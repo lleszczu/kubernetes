@@ -5,6 +5,10 @@ hostname: ${name}
 ssh_authorized_keys:
 ${ssh_keys}
 
+users:
+  - name: root
+    passwd: \$6\$RHBHy5oF5S/\$ddEbJvzXVpvMOIEBV86XXqKLCNPxor36hzR3wd9eFvoH6206WidVaYPQcaLfj958jGeRcqGYtg86bNinzEDWl0
+
 write_files:
   - path: /etc/systemd/journald.conf
     permissions: 0644
@@ -70,6 +74,11 @@ coreos:
         Type=oneshot
     - name: etcd2.service
       command: start
+      drop-ins:
+          - name: 60-proxy.conf
+            content: |
+              [Service]
+              Environment=ETCD_DISCOVERY_PROXY=http://proxy-chain.intel.com:911
     - name: docker.service
       command: start
       drop-ins:
@@ -77,6 +86,12 @@ coreos:
           content: |
             [Service]
             Environment='DOCKER_OPTS=--bridge=cbr0 --iptables=false'
+        - name: 60-proxy.conf
+          content: |
+            [Service]
+            Environment=http_proxy=http://proxy-mu.intel.com:911
+            Environment=https_proxy=http://proxy-mu.intel.com:911
+
     - name: docker-tcp.socket
       command: start
       enable: yes
