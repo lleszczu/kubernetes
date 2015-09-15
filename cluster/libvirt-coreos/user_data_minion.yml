@@ -19,7 +19,10 @@ coreos:
         --api-servers=http://${MASTER_IP}:8080 \
         $( [[ "$ENABLE_CLUSTER_DNS" == "true" ]] && echo "--cluster-dns=${DNS_SERVER_IP}" ) \
         $( [[ "$ENABLE_CLUSTER_DNS" == "true" ]] && echo "--cluster-domain=${DNS_DOMAIN}" ) \
-        --config=/opt/kubernetes/manifests
+        $( [[ "$CONTAINER_RUNTIME" == "rkt" ]] && echo "--container-runtime=rkt" ) \
+        $( [[ "$CONTAINER_RUNTIME" == "rkt" ]] && [[ ! -z "$RKT_PATH" ]] && echo "--rkt-path=${RKT_PATH}" ) \
+        $( [[ "$CONTAINER_RUNTIME" == "rkt" ]] && [[ ! -z "$RKT_STAGE1_IMAGE" ]] && echo "--rkt-stage1-image=${RKT_STAGE1_IMAGE}" ) \
+        --config=/opt/kubernetes/manifests 
         Restart=always
         RestartSec=2
 
