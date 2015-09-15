@@ -603,6 +603,8 @@ func (r *runtime) preparePod(pod *api.Pod, pullSecrets []api.Secret) (string, *k
 		newUnitOption("Service", "ExecStart", runPrepared),
 		// This enables graceful stop.
 		newUnitOption("Service", "KillMode", "mixed"),
+		// Workaround for running rkt witk lkvm from systemd
+		newUnitOption("Service", "Environment", "HOME=/root"),
 	}
 
 	// Check if there's old rkt pod corresponding to the same pod, if so, update the restart count.
