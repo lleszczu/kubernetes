@@ -145,6 +145,14 @@ function initialize-pool {
   fi
 
   virsh pool-refresh $POOL
+  if [[ "$CONTAINER_RUNTIME" == "rkt" ]]; then
+	  wget -N -P $ROOT https://github.com/coreos/rkt/releases/download/v0.8.0/rkt-v0.8.0.tar.gz
+	  tar -zxvf "$ROOT/rkt-v0.8.0.tar.gz"
+	  mkdir -p "$POOL_PATH/kubernetes/rkt"
+	  cp rkt-v0.8.0/* "$POOL_PATH/kubernetes/rkt"
+	  rm -rf rkt-v0.8.0/
+	  rm "$ROOT/rkt-v0.8.0.tar.gz"
+  fi
 }
 
 function destroy-network {
@@ -233,10 +241,12 @@ function kube-up {
         type=master
         name=$MASTER_NAME
         public_ip=$MASTER_IP
+        private_ip=$MASTER_PRIVATE_IP
     else
       type=minion-$(printf "%02d" $i)
       name=${MINION_NAMES[$i]}
       public_ip=${MINION_IPS[$i]}
+      private_ip=${MINION_PRIVATE_IPS[$i]}
     fi
     image=$name.img
     config=kubernetes_config_$type

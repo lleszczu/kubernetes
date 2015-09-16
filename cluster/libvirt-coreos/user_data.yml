@@ -20,6 +20,8 @@ coreos:
     initial-advertise-peer-urls: http://${public_ip}:2380
     listen-client-urls: http://0.0.0.0:2379
     listen-peer-urls: http://${public_ip}:2380
+  flannel:
+    interface: eth1
   units:
     - name: static.network
       command: start
@@ -32,6 +34,32 @@ coreos:
         Address=${public_ip}/24
         DNS=192.168.10.254
         Gateway=192.168.10.254
+        $(
+[[ "${NETWORK_PROVIDER}" == "flanneld" ]] && cat << NETWORK_CONFIG
+
+    - name: static-eth1.network
+      command: start
+      content: |
+        [Match]
+        Name=eth1
+        [Network]
+        Address=${private_ip}/24
+
+    - name: early-docker.service
+      command: start
+
+    - name: flanneld.service
+      command: start
+      drop-ins:
+        - name: configure-flanneld.conf
+          content: |
+            [Service]
+            ExecStartPre=/usr/bin/bash -c "until curl http://127.0.0.1:2379/v2/machines; do sleep 1; done; curl -X PUT -d 'value={\"Network\":\"${CONTAINER_SUBNET}\",\"Backend\": {\"Type\": \"vxlan\",\"VNI\":2}}' \"http://127.0.0.1:2379/v2/keys/coreos.com/network/config?prevExist=false\""
+
+NETWORK_CONFIG
+
+[[ "x${NETWORK_PROVIDER}" == "x" ]] && cat << NETWORK_CONFIG
+
     - name: cbr0.netdev
       command: start
       content: |
@@ -68,6 +96,10 @@ coreos:
         ExecStart=/usr/sbin/iptables -w -t nat -A POSTROUTING -o eth0 -j MASQUERADE ! -d ${CONTAINER_SUBNET}
         RemainAfterExit=yes
         Type=oneshot
+
+NETWORK_CONFIG
+)
+
     - name: etcd2.service
       command: start
     - name: docker.service
@@ -76,7 +108,22 @@ coreos:
         - name: 50-opts.conf
           content: |
             [Service]
+            $(
+[[ "${NETWORK_PROVIDER}" != "flanneld" ]] && cat << DOCKER_CONFIG
+
             Environment='DOCKER_OPTS=--bridge=cbr0 --iptables=false'
+
+DOCKER_CONFIG
+
+[[ "${NETWORK_PROVIDER}" == "flanneld" ]] && cat << DOCKER_CONFIG
+
+            EnvironmentFile=-/run/flannel_docker_opts.env
+            [Unit]
+            Requires=flanneld.service
+            After=flanneld.service
+
+DOCKER_CONFIG
+)
     - name: docker-tcp.socket
       command: start
       enable: yes
