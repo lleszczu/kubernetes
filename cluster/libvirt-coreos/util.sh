@@ -145,6 +145,13 @@ function initialize-pool {
   fi
 
   virsh pool-refresh $POOL
+  if [[ "$CONTAINER_RUNTIME" == "rkt" ]]; then
+      ### local way
+	  mkdir -p "$POOL_PATH/kubernetes/rkt"
+      ln -sv $RKT_LOCAL_PATH/rkt "$POOL_PATH/kubernetes/rkt"
+      ln -sv $RKT_LOCAL_PATH/stage1.aci "$POOL_PATH/kubernetes/rkt"
+      ln -sv $RKT_LOCAL_PATH/stage1-lkvm.aci "$POOL_PATH/kubernetes/rkt"
+  fi
 }
 
 function destroy-network {
