@@ -21,6 +21,8 @@ coreos:
     listen-peer-urls: http://${public_ip}:2380
     initial-cluster-state: new
     initial-cluster: ${etcd2_initial_cluster}
+  flannel:
+    interface: eth1
   units:
     - name: static.network
       command: start
@@ -33,42 +35,30 @@ coreos:
         Address=${public_ip}/24
         DNS=192.168.10.254
         Gateway=192.168.10.254
-    - name: cbr0.netdev
-      command: start
-      content: |
-        [NetDev]
-        Kind=bridge
-        Name=cbr0
-    - name: cbr0.network
+
+    - name: static-eth1.network
       command: start
       content: |
         [Match]
-        Name=cbr0
-
+        Name=eth1
         [Network]
-        Address=${MINION_CONTAINER_SUBNETS[$i]}
+        Address=${private_ip}/24
 
-        [Route]
-        Destination=${CONTAINER_SUBNET}
-    - name: cbr0-interface.network
+    - name: early-docker.service
       command: start
-      content: |
-        [Match]
-        # Name=eth1
-        MACAddress=52:54:00:00:01:${i}
 
-        [Network]
-        Bridge=cbr0
-    - name: nat.service
+    - name: flanneld.service
       command: start
-      content: |
-        [Unit]
-        Description=NAT non container traffic
+      drop-ins:
+        - name: configure-flanneld.conf
+          content: |
+            [Unit]
+            Requires=etcd2.service
+            After=etcd2.service
+            [Service]
+            ExecStartPre=/usr/bin/bash -c 'until curl http://127.0.0.1:2379/v2/machines; do sleep 1; done; curl -X PUT -d \'value={\"Network\":\"10.10.0.0/16\",\"Backend\": {\"Type\": \"vxlan\",\"VNI\":2}}\' \"http://127.0.0.1:2379/v2/keys/coreos.com/network/config?prevExist=false\"'
 
-        [Service]
-        ExecStart=/usr/sbin/iptables -w -t nat -A POSTROUTING -o eth0 -j MASQUERADE ! -d ${CONTAINER_SUBNET}
-        RemainAfterExit=yes
-        Type=oneshot
+
     - name: etcd2.service
       command: start
       drop-ins:
@@ -82,7 +72,22 @@ coreos:
         - name: 50-opts.conf
           content: |
             [Service]
+            $(
+[[ "${NETWORK_PROVIDER}" != "flanneld" ]] && cat << DOCKER_CONFIG
+
             Environment='DOCKER_OPTS=--bridge=cbr0 --iptables=false'
+
+DOCKER_CONFIG
+
+[[ "${NETWORK_PROVIDER}" == "flanneld" ]] && cat << DOCKER_CONFIG
+
+            EnvironmentFile=-/run/flannel_docker_opts.env
+            [Unit]
+            Requires=flanneld.service
+            After=flanneld.service
+
+DOCKER_CONFIG
+)
     - name: docker-tcp.socket
       command: start
       enable: yes
@@ -97,6 +102,7 @@ coreos:
 
         [Install]
         WantedBy=sockets.target
+
     - name: opt-kubernetes.mount
       command: start
       content: |
