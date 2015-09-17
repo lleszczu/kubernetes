@@ -146,12 +146,17 @@ function initialize-pool {
 
   virsh pool-refresh $POOL
   if [[ "$CONTAINER_RUNTIME" == "rkt" ]]; then
-	  wget -N -P $ROOT https://github.com/coreos/rkt/releases/download/v0.8.0/rkt-v0.8.0.tar.gz
-	  tar -zxvf "$ROOT/rkt-v0.8.0.tar.gz"
+	  # wget -N -P $ROOT https://github.com/coreos/rkt/releases/download/v0.8.0/rkt-v0.8.0.tar.gz
+	  # tar -zxvf "$ROOT/rkt-v0.8.0.tar.gz"
+	  # mkdir -p "$POOL_PATH/kubernetes/rkt"
+	  # cp rkt-v0.8.0/* "$POOL_PATH/kubernetes/rkt"
+	  # rm -rf rkt-v0.8.0/
+	  # rm "$ROOT/rkt-v0.8.0.tar.gz"
+      ### local way
 	  mkdir -p "$POOL_PATH/kubernetes/rkt"
-	  cp rkt-v0.8.0/* "$POOL_PATH/kubernetes/rkt"
-	  rm -rf rkt-v0.8.0/
-	  rm "$ROOT/rkt-v0.8.0.tar.gz"
+      ln -sv $RKT_LOCAL_PATH/rkt "$POOL_PATH/kubernetes/rkt"
+      ln -sv $RKT_LOCAL_PATH/stage1.aci "$POOL_PATH/kubernetes/rkt"
+      ln -sv $RKT_LOCAL_PATH/stage1-lkvm.aci "$POOL_PATH/kubernetes/rkt"
   fi
 }
 
