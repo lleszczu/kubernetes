@@ -20,7 +20,7 @@ write_files:
 coreos:
   etcd2:
     advertise-client-urls: http://${public_ip}:2379
-    discovery-proxy: http://${http_proxy}
+    discovery-proxy: ${http_proxy}
     initial-advertise-peer-urls: http://${public_ip}:2380
     listen-client-urls: http://0.0.0.0:2379
     listen-peer-urls: http://${public_ip}:2380
