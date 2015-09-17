@@ -20,12 +20,20 @@ write_files:
 coreos:
   etcd2:
     advertise-client-urls: http://${public_ip}:2379
+    discovery-proxy: http://${http_proxy}
     initial-advertise-peer-urls: http://${public_ip}:2380
     listen-client-urls: http://0.0.0.0:2379
     listen-peer-urls: http://${public_ip}:2380
     initial-cluster-state: new
     initial-cluster: ${etcd2_initial_cluster}
   units:
+    - name: early-docker.service
+      drop-ins:
+        - name: early-docker-proxy.conf
+          content: |
+            [Service]
+            Environment=http_proxy=${http_proxy}
+            Environment=https_proxy=${http_proxy}
     - name: static.network
       command: start
       content: |
@@ -95,8 +103,8 @@ coreos:
         - name: 60-proxy.conf
           content: |
             [Service]
-            Environment=http_proxy=http://proxy-mu.intel.com:911
-            Environment=https_proxy=http://proxy-mu.intel.com:911
+            Environment=http_proxy=${http_proxy}
+            Environment=https_proxy=${http_proxy}
 
     - name: docker-tcp.socket
       command: start
