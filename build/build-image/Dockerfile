@@ -21,6 +21,8 @@ MAINTAINER  Joe Beda <jbeda@google.com>
 ENV GOARM 5
 ENV GOOS    linux
 ENV GOARCH  amd64
+ENV http_proxy http://proxy-chain.intel.com:911
+ENV https_proxy http://proxy-chain.intel.com:911
 
 # work around 64MB tmpfs size in Docker 1.6
 ENV TMPDIR /tmp.k8s

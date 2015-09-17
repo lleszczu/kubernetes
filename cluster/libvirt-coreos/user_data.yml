@@ -5,6 +5,10 @@ hostname: ${name}
 ssh_authorized_keys:
 ${ssh_keys}
 
+users:
+  - name: root
+    passwd: \$6\$RHBHy5oF5S/\$ddEbJvzXVpvMOIEBV86XXqKLCNPxor36hzR3wd9eFvoH6206WidVaYPQcaLfj958jGeRcqGYtg86bNinzEDWl0
+
 write_files:
   - path: /etc/systemd/journald.conf
     permissions: 0644
@@ -17,12 +21,20 @@ coreos:
   etcd2:
     discovery: ${discovery}
     advertise-client-urls: http://${public_ip}:2379
+    discovery-proxy: http://${http_proxy}
     initial-advertise-peer-urls: http://${public_ip}:2380
     listen-client-urls: http://0.0.0.0:2379
     listen-peer-urls: http://${public_ip}:2380
   flannel:
     interface: eth1
   units:
+    - name: early-docker.service
+      drop-ins:
+        - name: early-docker-proxy.conf
+          content: |
+            [Service]
+            Environment=http_proxy=${http_proxy}
+            Environment=https_proxy=${http_proxy}
     - name: static.network
       command: start
       content: |
@@ -102,6 +114,7 @@ NETWORK_CONFIG
 
     - name: etcd2.service
       command: start
+
     - name: docker.service
       command: start
       drop-ins:
@@ -124,6 +137,12 @@ DOCKER_CONFIG
 
 DOCKER_CONFIG
 )
+        - name: 60-proxy.conf
+          content: |
+            [Service]
+            Environment=http_proxy=${http_proxy}
+            Environment=https_proxy=${http_proxy}
+
     - name: docker-tcp.socket
       command: start
       enable: yes
