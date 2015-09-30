@@ -142,14 +142,6 @@ function initialize-pool {
   fi
 
   virsh pool-refresh $POOL
-  if [[ "$CONTAINER_RUNTIME" == "rkt" ]]; then
-	  wget -N -P $ROOT https://github.com/coreos/rkt/releases/download/v0.8.0/rkt-v0.8.0.tar.gz
-	  tar -zxvf "$ROOT/rkt-v0.8.0.tar.gz"
-	  mkdir -p "$POOL_PATH/kubernetes/rkt"
-	  cp rkt-v0.8.0/* "$POOL_PATH/kubernetes/rkt"
-	  rm -rf rkt-v0.8.0/
-	  rm "$ROOT/rkt-v0.8.0.tar.gz"
-  fi
 }
 
 function destroy-network {
@@ -234,6 +226,12 @@ function kube-up {
     render-template $ROOT/coreos.xml > $domain_xml
     virsh create $domain_xml
     rm $domain_xml
+
+
+    ### install rkt binnary and aci
+    ln -vf $RKT_LOCAL_PATH/rkt cluster/libvirt-coreos/libvirt_storage_pool/kubernetes/bin/
+    ln -vf $RKT_LOCAL_PATH/stage1-*.aci cluster/libvirt-coreos/libvirt_storage_pool/kubernetes/bin/
+
   done
 
   export KUBE_SERVER="http://192.168.10.1:8080"

@@ -199,6 +199,7 @@ func (r *Runtime) runCommand(args ...string) ([]string, error) {
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to run %v: %v\nstdout: %v\nstderr: %v", args, err, stdout.String(), stderr.String())
 	}
+	glog.V(4).Info("rkt: CMD run command:", cmd.Args)
 	return strings.Split(strings.TrimSpace(stdout.String()), "\n"), nil
 }
 

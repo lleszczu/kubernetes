@@ -61,7 +61,7 @@ coreos:
         [Install]
         WantedBy=multi-user.target
     - name: kube-addons.service
-      command: start
+      command: stop
       content: |
         [Unit]
         After=opt-kubernetes.mount kube-apiserver.service

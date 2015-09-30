@@ -357,6 +357,7 @@ func NewMainKubelet(
 			Path:               rktPath,
 			Stage1Image:        rktStage1Image,
 			InsecureSkipVerify: true,
+			Debug:              true,
 		}
 		rktRuntime, err := rkt.New(
 			conf,

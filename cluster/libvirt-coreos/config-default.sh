@@ -63,6 +63,7 @@ DNS_REPLICAS=1
 
 # Optional: Configure container runtime
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
-RKT_PATH="${RKT_PATH:-}"
-RKT_STAGE1_IMAGE="${RKT_STAGE1_IMAGE:-}"
-NETWORK_PROVIDER="${NETWORK_PROVIDER:-}"
+RKT_PATH="${RKT_PATH:-/opt/kubernetes/rkt/rkt}"
+RKT_STAGE1_IMAGE="${RKT_STAGE1_IMAGE:-/opt/kubernetes/rkt/stage1-coreos.aci}"
+NETWORK_PROVIDER="${NETWORK_PROVIDER:-flanneld}"
+RKT_LOCAL_PATH="${RKT_LOCAL_PATH:-$GOPATH/src/github.com/coreos/rkt/bin}"
