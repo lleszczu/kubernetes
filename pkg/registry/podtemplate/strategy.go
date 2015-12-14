@@ -25,7 +25,7 @@ import (
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/runtime"
-	errs "k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 // podTemplateStrategy implements behavior for PodTemplates
@@ -49,9 +49,13 @@ func (podTemplateStrategy) PrepareForCreate(obj runtime.Object) {
 }
 
 // Validate validates a new pod template.
-func (podTemplateStrategy) Validate(ctx api.Context, obj runtime.Object) errs.ValidationErrorList {
+func (podTemplateStrategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
 	pod := obj.(*api.PodTemplate)
 	return validation.ValidatePodTemplate(pod)
+}
+
+// Canonicalize normalizes the object after validation.
+func (podTemplateStrategy) Canonicalize(obj runtime.Object) {
 }
 
 // AllowCreateOnUpdate is false for pod templates.
@@ -65,7 +69,7 @@ func (podTemplateStrategy) PrepareForUpdate(obj, old runtime.Object) {
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (podTemplateStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) errs.ValidationErrorList {
+func (podTemplateStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidatePodTemplateUpdate(obj.(*api.PodTemplate), old.(*api.PodTemplate))
 }
 
@@ -73,13 +77,20 @@ func (podTemplateStrategy) AllowUnconditionalUpdate() bool {
 	return true
 }
 
-// MatchPodTemplate returns a generic matcher for a given label and field selector.
+func PodTemplateToSelectableFields(podTemplate *api.PodTemplate) fields.Set {
+	return fields.Set{}
+}
+
 func MatchPodTemplate(label labels.Selector, field fields.Selector) generic.Matcher {
-	return generic.MatcherFunc(func(obj runtime.Object) (bool, error) {
-		podObj, ok := obj.(*api.PodTemplate)
-		if !ok {
-			return false, fmt.Errorf("not a pod template")
-		}
-		return label.Matches(labels.Set(podObj.Labels)), nil
-	})
+	return &generic.SelectionPredicate{
+		Label: label,
+		Field: field,
+		GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
+			pt, ok := obj.(*api.PodTemplate)
+			if !ok {
+				return nil, nil, fmt.Errorf("given object is not a pod template.")
+			}
+			return labels.Set(pt.ObjectMeta.Labels), PodTemplateToSelectableFields(pt), nil
+		},
+	}
 }

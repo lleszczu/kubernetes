@@ -25,6 +25,11 @@ set -o nounset
 set -o pipefail
 
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
+
+if [ -f "${KUBE_ROOT}/cluster/env.sh" ]; then
+    source "${KUBE_ROOT}/cluster/env.sh"
+fi
+
 source "${KUBE_ROOT}/cluster/kube-env.sh"
 source "${KUBE_ROOT}/cluster/kube-util.sh"
 
@@ -32,6 +37,11 @@ echo "... Starting cluster using provider: $KUBERNETES_PROVIDER" >&2
 
 echo "... calling verify-prereqs" >&2
 verify-prereqs
+
+if [[ "${KUBE_STAGE_IMAGES:-}" == "true" ]]; then
+  echo "... staging images" >&2
+  stage-images
+fi
 
 echo "... calling kube-up" >&2
 kube-up

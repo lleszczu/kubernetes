@@ -29,8 +29,9 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/testapi"
+	apitesting "k8s.io/kubernetes/pkg/api/testing"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 func TestMerge(t *testing.T) {
@@ -49,16 +50,12 @@ func TestMerge(t *testing.T) {
 					Name: "foo",
 				},
 			},
-			fragment: fmt.Sprintf(`{ "apiVersion": "%s" }`, testapi.Version()),
+			fragment: fmt.Sprintf(`{ "apiVersion": "%s" }`, testapi.Default.GroupVersion().String()),
 			expected: &api.Pod{
 				ObjectMeta: api.ObjectMeta{
 					Name: "foo",
 				},
-				Spec: api.PodSpec{
-					RestartPolicy:                 api.RestartPolicyAlways,
-					DNSPolicy:                     api.DNSClusterFirst,
-					TerminationGracePeriodSeconds: &grace,
-				},
+				Spec: apitesting.DeepEqualSafePodSpec(),
 			},
 		},
 		/* TODO: uncomment this test once Merge is updated to use
@@ -82,7 +79,7 @@ func TestMerge(t *testing.T) {
 					},
 				},
 			},
-			fragment: fmt.Sprintf(`{ "apiVersion": "%s", "spec": { "containers": [ { "name": "c1", "image": "green-image" } ] } }`, testapi.Version()),
+			fragment: fmt.Sprintf(`{ "apiVersion": "%s", "spec": { "containers": [ { "name": "c1", "image": "green-image" } ] } }`, testapi.Default.GroupVersion().String()),
 			expected: &api.Pod{
 				ObjectMeta: api.ObjectMeta{
 					Name: "foo",
@@ -108,7 +105,7 @@ func TestMerge(t *testing.T) {
 					Name: "foo",
 				},
 			},
-			fragment: fmt.Sprintf(`{ "apiVersion": "%s", "spec": { "volumes": [ {"name": "v1"}, {"name": "v2"} ] } }`, testapi.Version()),
+			fragment: fmt.Sprintf(`{ "apiVersion": "%s", "spec": { "volumes": [ {"name": "v1"}, {"name": "v2"} ] } }`, testapi.Default.GroupVersion().String()),
 			expected: &api.Pod{
 				ObjectMeta: api.ObjectMeta{
 					Name: "foo",
@@ -127,6 +124,7 @@ func TestMerge(t *testing.T) {
 					RestartPolicy:                 api.RestartPolicyAlways,
 					DNSPolicy:                     api.DNSClusterFirst,
 					TerminationGracePeriodSeconds: &grace,
+					SecurityContext:               &api.PodSecurityContext{},
 				},
 			},
 		},
@@ -148,7 +146,7 @@ func TestMerge(t *testing.T) {
 			obj: &api.Service{
 				Spec: api.ServiceSpec{},
 			},
-			fragment: fmt.Sprintf(`{ "apiVersion": "%s", "spec": { "ports": [ { "port": 0 } ] } }`, testapi.Version()),
+			fragment: fmt.Sprintf(`{ "apiVersion": "%s", "spec": { "ports": [ { "port": 0 } ] } }`, testapi.Default.GroupVersion().String()),
 			expected: &api.Service{
 				Spec: api.ServiceSpec{
 					SessionAffinity: "None",
@@ -171,7 +169,7 @@ func TestMerge(t *testing.T) {
 					},
 				},
 			},
-			fragment: fmt.Sprintf(`{ "apiVersion": "%s", "spec": { "selector": { "version": "v2" } } }`, testapi.Version()),
+			fragment: fmt.Sprintf(`{ "apiVersion": "%s", "spec": { "selector": { "version": "v2" } } }`, testapi.Default.GroupVersion().String()),
 			expected: &api.Service{
 				Spec: api.ServiceSpec{
 					SessionAffinity: "None",
@@ -276,15 +274,15 @@ func TestCheckInvalidErr(t *testing.T) {
 		expected string
 	}{
 		{
-			errors.NewInvalid("Invalid1", "invalidation", fielderrors.ValidationErrorList{fielderrors.NewFieldInvalid("Cause", "single", "details")}),
-			`Error from server: Invalid1 "invalidation" is invalid: Cause: invalid value 'single', Details: details`,
+			errors.NewInvalid("Invalid1", "invalidation", field.ErrorList{field.Invalid(field.NewPath("field"), "single", "details")}),
+			`Error from server: Invalid1 "invalidation" is invalid: field: invalid value 'single', Details: details`,
 		},
 		{
-			errors.NewInvalid("Invalid2", "invalidation", fielderrors.ValidationErrorList{fielderrors.NewFieldInvalid("Cause", "multi1", "details"), fielderrors.NewFieldInvalid("Cause", "multi2", "details")}),
-			`Error from server: Invalid2 "invalidation" is invalid: [Cause: invalid value 'multi1', Details: details, Cause: invalid value 'multi2', Details: details]`,
+			errors.NewInvalid("Invalid2", "invalidation", field.ErrorList{field.Invalid(field.NewPath("field1"), "multi1", "details"), field.Invalid(field.NewPath("field2"), "multi2", "details")}),
+			`Error from server: Invalid2 "invalidation" is invalid: [field1: invalid value 'multi1', Details: details, field2: invalid value 'multi2', Details: details]`,
 		},
 		{
-			errors.NewInvalid("Invalid3", "invalidation", fielderrors.ValidationErrorList{}),
+			errors.NewInvalid("Invalid3", "invalidation", field.ErrorList{}),
 			`Error from server: Invalid3 "invalidation" is invalid: <nil>`,
 		},
 	}

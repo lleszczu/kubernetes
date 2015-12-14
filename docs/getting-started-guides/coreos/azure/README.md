@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/getting-started-guides/coreos/azure/README.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/getting-started-guides/coreos/azure/README.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -57,7 +57,7 @@ In this guide I will demonstrate how to deploy a Kubernetes cluster to Azure clo
 To get started, you need to checkout the code:
 
 ```sh
-git clone https://github.com/GoogleCloudPlatform/kubernetes
+git clone https://github.com/kubernetes/kubernetes
 cd kubernetes/docs/getting-started-guides/coreos/azure/
 ```
 

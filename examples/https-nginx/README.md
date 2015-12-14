@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/examples/https-nginx/README.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/examples/https-nginx/README.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -38,7 +38,7 @@ It uses an [nginx server block](http://wiki.nginx.org/ServerBlockExample) to ser
 
 ### Generate certificates
 
-First generate a self signed rsa key and certificate that the server can use for TLS.
+First generate a self signed rsa key and certificate that the server can use for TLS. This step invokes the make_secret.go script in the same directory, which uses the kubernetes api to generate a secret json config in /tmp/secret.json.
 
 ```sh
 $ make keys secret KEY=/tmp/nginx.key CERT=/tmp/nginx.crt SECRET=/tmp/secret.json

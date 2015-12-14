@@ -17,17 +17,15 @@ limitations under the License.
 package exists
 
 import (
-	"fmt"
 	"io"
 	"time"
 
 	"k8s.io/kubernetes/pkg/admission"
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/meta"
+	"k8s.io/kubernetes/pkg/client/cache"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/client/unversioned/cache"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/watch"
 )
@@ -48,13 +46,13 @@ type exists struct {
 }
 
 func (e *exists) Admit(a admission.Attributes) (err error) {
-	defaultVersion, kind, err := api.RESTMapper.VersionAndKindForResource(a.GetResource())
+	gvk, err := api.RESTMapper.KindFor(a.GetResource().Resource)
 	if err != nil {
-		return admission.NewForbidden(a, err)
+		return errors.NewInternalError(err)
 	}
-	mapping, err := api.RESTMapper.RESTMapping(kind, defaultVersion)
+	mapping, err := api.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	if err != nil {
-		return admission.NewForbidden(a, err)
+		return errors.NewInternalError(err)
 	}
 	if mapping.Scope.Name() != meta.RESTScopeNameNamespace {
 		return nil
@@ -68,7 +66,7 @@ func (e *exists) Admit(a admission.Attributes) (err error) {
 	}
 	_, exists, err := e.store.Get(namespace)
 	if err != nil {
-		return admission.NewForbidden(a, err)
+		return errors.NewInternalError(err)
 	}
 	if exists {
 		return nil
@@ -77,7 +75,10 @@ func (e *exists) Admit(a admission.Attributes) (err error) {
 	// in case of latency in our caches, make a call direct to storage to verify that it truly exists or not
 	_, err = e.client.Namespaces().Get(a.GetNamespace())
 	if err != nil {
-		return admission.NewForbidden(a, fmt.Errorf("Namespace %s does not exist", a.GetNamespace()))
+		if errors.IsNotFound(err) {
+			return err
+		}
+		return errors.NewInternalError(err)
 	}
 
 	return nil
@@ -88,11 +89,11 @@ func NewExists(c client.Interface) admission.Interface {
 	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
 	reflector := cache.NewReflector(
 		&cache.ListWatch{
-			ListFunc: func() (runtime.Object, error) {
-				return c.Namespaces().List(labels.Everything(), fields.Everything())
+			ListFunc: func(options api.ListOptions) (runtime.Object, error) {
+				return c.Namespaces().List(options)
 			},
-			WatchFunc: func(resourceVersion string) (watch.Interface, error) {
-				return c.Namespaces().Watch(labels.Everything(), fields.Everything(), resourceVersion)
+			WatchFunc: func(options api.ListOptions) (watch.Interface, error) {
+				return c.Namespaces().Watch(options)
 			},
 		},
 		&api.Namespace{},

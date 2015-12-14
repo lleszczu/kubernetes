@@ -29,9 +29,12 @@ import (
 	"golang.org/x/net/websocket"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/rest"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	apiservertesting "k8s.io/kubernetes/pkg/apiserver/testing"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/watch"
 )
 
@@ -45,9 +48,9 @@ var watchTestTable = []struct {
 	t   watch.EventType
 	obj runtime.Object
 }{
-	{watch.Added, &Simple{ObjectMeta: api.ObjectMeta{Name: "foo"}}},
-	{watch.Modified, &Simple{ObjectMeta: api.ObjectMeta{Name: "bar"}}},
-	{watch.Deleted, &Simple{ObjectMeta: api.ObjectMeta{Name: "bar"}}},
+	{watch.Added, &apiservertesting.Simple{ObjectMeta: api.ObjectMeta{Name: "foo"}}},
+	{watch.Modified, &apiservertesting.Simple{ObjectMeta: api.ObjectMeta{Name: "bar"}}},
+	{watch.Deleted, &apiservertesting.Simple{ObjectMeta: api.ObjectMeta{Name: "bar"}}},
 }
 
 func TestWatchWebsocket(t *testing.T) {
@@ -59,7 +62,7 @@ func TestWatchWebsocket(t *testing.T) {
 
 	dest, _ := url.Parse(server.URL)
 	dest.Scheme = "ws" // Required by websocket, though the server never sees it.
-	dest.Path = "/api/version/watch/simples"
+	dest.Path = "/" + prefix + "/" + testGroupVersion.Group + "/" + testGroupVersion.Version + "/watch/simples"
 	dest.RawQuery = ""
 
 	ws, err := websocket.Dial(dest.String(), "", "http://localhost")
@@ -79,7 +82,7 @@ func TestWatchWebsocket(t *testing.T) {
 		if got.Type != action {
 			t.Errorf("Unexpected type: %v", got.Type)
 		}
-		gotObj, err := codec.Decode(got.Object)
+		gotObj, err := runtime.Decode(codec, got.Object)
 		if err != nil {
 			t.Fatalf("Decode error: %v", err)
 		}
@@ -111,7 +114,7 @@ func TestWatchHTTP(t *testing.T) {
 	client := http.Client{}
 
 	dest, _ := url.Parse(server.URL)
-	dest.Path = "/api/version/watch/simples"
+	dest.Path = "/" + prefix + "/" + testGroupVersion.Group + "/" + testGroupVersion.Version + "/watch/simples"
 	dest.RawQuery = ""
 
 	request, err := http.NewRequest("GET", dest.String(), nil)
@@ -143,7 +146,7 @@ func TestWatchHTTP(t *testing.T) {
 			t.Errorf("%d: Unexpected type: %v", i, got.Type)
 		}
 		t.Logf("obj: %v", string(got.Object))
-		gotObj, err := codec.Decode(got.Object)
+		gotObj, err := runtime.Decode(codec, got.Object)
 		if err != nil {
 			t.Fatalf("Decode error: %v", err)
 		}
@@ -175,8 +178,8 @@ func TestWatchParamParsing(t *testing.T) {
 
 	dest, _ := url.Parse(server.URL)
 
-	rootPath := "/api/" + testVersion + "/watch/simples"
-	namespacedPath := "/api/" + testVersion + "/watch/namespaces/other/simpleroots"
+	rootPath := "/" + prefix + "/" + testGroupVersion.Group + "/" + testGroupVersion.Version + "/watch/simples"
+	namespacedPath := "/" + prefix + "/" + testGroupVersion.Group + "/" + testGroupVersion.Version + "/watch/namespaces/other/simpleroots"
 
 	table := []struct {
 		path            string
@@ -195,14 +198,14 @@ func TestWatchParamParsing(t *testing.T) {
 			namespace:       api.NamespaceAll,
 		}, {
 			path:            rootPath,
-			rawQuery:        "resourceVersion=314159&fields=Host%3D&labels=name%3Dfoo",
+			rawQuery:        "resourceVersion=314159&fieldSelector=Host%3D&labelSelector=name%3Dfoo",
 			resourceVersion: "314159",
 			labelSelector:   "name=foo",
 			fieldSelector:   "Host=",
 			namespace:       api.NamespaceAll,
 		}, {
 			path:            rootPath,
-			rawQuery:        "fields=id%3dfoo&resourceVersion=1492",
+			rawQuery:        "fieldSelector=id%3dfoo&resourceVersion=1492",
 			resourceVersion: "1492",
 			labelSelector:   "",
 			fieldSelector:   "id=foo",
@@ -224,14 +227,14 @@ func TestWatchParamParsing(t *testing.T) {
 			namespace:       "other",
 		}, {
 			path:            namespacedPath,
-			rawQuery:        "resourceVersion=314159&fields=Host%3D&labels=name%3Dfoo",
+			rawQuery:        "resourceVersion=314159&fieldSelector=Host%3D&labelSelector=name%3Dfoo",
 			resourceVersion: "314159",
 			labelSelector:   "name=foo",
 			fieldSelector:   "Host=",
 			namespace:       "other",
 		}, {
 			path:            namespacedPath,
-			rawQuery:        "fields=id%3dfoo&resourceVersion=1492",
+			rawQuery:        "fieldSelector=id%3dfoo&resourceVersion=1492",
 			resourceVersion: "1492",
 			labelSelector:   "",
 			fieldSelector:   "id=foo",
@@ -283,7 +286,7 @@ func TestWatchProtocolSelection(t *testing.T) {
 	client := http.Client{}
 
 	dest, _ := url.Parse(server.URL)
-	dest.Path = "/api/version/watch/simples"
+	dest.Path = "/" + prefix + "/" + testGroupVersion.Group + "/" + testGroupVersion.Version + "/watch/simples"
 	dest.RawQuery = ""
 
 	table := []struct {
@@ -355,13 +358,13 @@ func TestWatchHTTPTimeout(t *testing.T) {
 
 	// Setup a client
 	dest, _ := url.Parse(s.URL)
-	dest.Path = "/api/" + newVersion + "/simple"
+	dest.Path = "/" + prefix + "/" + newGroupVersion.Group + "/" + newGroupVersion.Version + "/simple"
 	dest.RawQuery = "watch=true"
 
 	req, _ := http.NewRequest("GET", dest.String(), nil)
 	client := http.Client{}
 	resp, err := client.Do(req)
-	watcher.Add(&Simple{TypeMeta: api.TypeMeta{APIVersion: newVersion}})
+	watcher.Add(&apiservertesting.Simple{TypeMeta: unversioned.TypeMeta{APIVersion: newGroupVersion.String()}})
 
 	// Make sure we can actually watch an endpoint
 	decoder := json.NewDecoder(resp.Body)
@@ -378,8 +381,8 @@ func TestWatchHTTPTimeout(t *testing.T) {
 		if !watcher.Stopped {
 			t.Errorf("Leaked watch on timeout")
 		}
-	case <-time.After(100 * time.Millisecond):
-		t.Errorf("Failed to stop watcher after 100ms of timeout signal")
+	case <-time.After(util.ForeverTestTimeout):
+		t.Errorf("Failed to stop watcher after %s of timeout signal", util.ForeverTestTimeout.String())
 	}
 
 	// Make sure we can't receive any more events through the timeout watch

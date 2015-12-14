@@ -14,7 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package unversioned
+package unversioned_test
+
+import (
+	. "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/client/unversioned/testclient/simple"
+)
 
 import (
 	"net/url"
@@ -22,17 +27,18 @@ import (
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/testapi"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/labels"
 )
 
 func TestListServices(t *testing.T) {
 	ns := api.NamespaceDefault
-	c := &testClient{
-		Request: testRequest{
+	c := &simple.Client{
+		Request: simple.Request{
 			Method: "GET",
-			Path:   testapi.ResourcePath("services", ns, ""),
-			Query:  buildQueryValues(nil)},
-		Response: Response{StatusCode: 200,
+			Path:   testapi.Default.ResourcePath("services", ns, ""),
+			Query:  simple.BuildQueryValues(nil)},
+		Response: simple.Response{StatusCode: 200,
 			Body: &api.ServiceList{
 				Items: []api.Service{
 					{
@@ -53,20 +59,20 @@ func TestListServices(t *testing.T) {
 			},
 		},
 	}
-	receivedServiceList, err := c.Setup().Services(ns).List(labels.Everything())
+	receivedServiceList, err := c.Setup(t).Services(ns).List(api.ListOptions{})
 	t.Logf("received services: %v %#v", err, receivedServiceList)
 	c.Validate(t, receivedServiceList, err)
 }
 
 func TestListServicesLabels(t *testing.T) {
 	ns := api.NamespaceDefault
-	labelSelectorQueryParamName := api.LabelSelectorQueryParam(testapi.Version())
-	c := &testClient{
-		Request: testRequest{
+	labelSelectorQueryParamName := unversioned.LabelSelectorQueryParam(testapi.Default.GroupVersion().String())
+	c := &simple.Client{
+		Request: simple.Request{
 			Method: "GET",
-			Path:   testapi.ResourcePath("services", ns, ""),
-			Query:  buildQueryValues(url.Values{labelSelectorQueryParamName: []string{"foo=bar,name=baz"}})},
-		Response: Response{StatusCode: 200,
+			Path:   testapi.Default.ResourcePath("services", ns, ""),
+			Query:  simple.BuildQueryValues(url.Values{labelSelectorQueryParamName: []string{"foo=bar,name=baz"}})},
+		Response: simple.Response{StatusCode: 200,
 			Body: &api.ServiceList{
 				Items: []api.Service{
 					{
@@ -87,32 +93,33 @@ func TestListServicesLabels(t *testing.T) {
 			},
 		},
 	}
-	c.Setup()
-	c.QueryValidator[labelSelectorQueryParamName] = validateLabels
+	c.Setup(t)
+	c.QueryValidator[labelSelectorQueryParamName] = simple.ValidateLabels
 	selector := labels.Set{"foo": "bar", "name": "baz"}.AsSelector()
-	receivedServiceList, err := c.Services(ns).List(selector)
+	options := api.ListOptions{LabelSelector: selector}
+	receivedServiceList, err := c.Services(ns).List(options)
 	c.Validate(t, receivedServiceList, err)
 }
 
 func TestGetService(t *testing.T) {
 	ns := api.NamespaceDefault
-	c := &testClient{
-		Request: testRequest{
+	c := &simple.Client{
+		Request: simple.Request{
 			Method: "GET",
-			Path:   testapi.ResourcePath("services", ns, "1"),
-			Query:  buildQueryValues(nil)},
-		Response: Response{StatusCode: 200, Body: &api.Service{ObjectMeta: api.ObjectMeta{Name: "service-1"}}},
+			Path:   testapi.Default.ResourcePath("services", ns, "1"),
+			Query:  simple.BuildQueryValues(nil)},
+		Response: simple.Response{StatusCode: 200, Body: &api.Service{ObjectMeta: api.ObjectMeta{Name: "service-1"}}},
 	}
-	response, err := c.Setup().Services(ns).Get("1")
+	response, err := c.Setup(t).Services(ns).Get("1")
 	c.Validate(t, response, err)
 }
 
 func TestGetServiceWithNoName(t *testing.T) {
 	ns := api.NamespaceDefault
-	c := &testClient{Error: true}
-	receivedPod, err := c.Setup().Services(ns).Get("")
-	if (err != nil) && (err.Error() != nameRequiredError) {
-		t.Errorf("Expected error: %v, but got %v", nameRequiredError, err)
+	c := &simple.Client{Error: true}
+	receivedPod, err := c.Setup(t).Services(ns).Get("")
+	if (err != nil) && (err.Error() != simple.NameRequiredError) {
+		t.Errorf("Expected error: %v, but got %v", simple.NameRequiredError, err)
 	}
 
 	c.Validate(t, receivedPod, err)
@@ -120,50 +127,62 @@ func TestGetServiceWithNoName(t *testing.T) {
 
 func TestCreateService(t *testing.T) {
 	ns := api.NamespaceDefault
-	c := &testClient{
-		Request: testRequest{
+	c := &simple.Client{
+		Request: simple.Request{
 			Method: "POST",
-			Path:   testapi.ResourcePath("services", ns, ""),
+			Path:   testapi.Default.ResourcePath("services", ns, ""),
 			Body:   &api.Service{ObjectMeta: api.ObjectMeta{Name: "service-1"}},
-			Query:  buildQueryValues(nil)},
-		Response: Response{StatusCode: 200, Body: &api.Service{ObjectMeta: api.ObjectMeta{Name: "service-1"}}},
+			Query:  simple.BuildQueryValues(nil)},
+		Response: simple.Response{StatusCode: 200, Body: &api.Service{ObjectMeta: api.ObjectMeta{Name: "service-1"}}},
 	}
-	response, err := c.Setup().Services(ns).Create(&api.Service{ObjectMeta: api.ObjectMeta{Name: "service-1"}})
+	response, err := c.Setup(t).Services(ns).Create(&api.Service{ObjectMeta: api.ObjectMeta{Name: "service-1"}})
 	c.Validate(t, response, err)
 }
 
 func TestUpdateService(t *testing.T) {
 	ns := api.NamespaceDefault
 	svc := &api.Service{ObjectMeta: api.ObjectMeta{Name: "service-1", ResourceVersion: "1"}}
-	c := &testClient{
-		Request:  testRequest{Method: "PUT", Path: testapi.ResourcePath("services", ns, "service-1"), Body: svc, Query: buildQueryValues(nil)},
-		Response: Response{StatusCode: 200, Body: svc},
+	c := &simple.Client{
+		Request:  simple.Request{Method: "PUT", Path: testapi.Default.ResourcePath("services", ns, "service-1"), Body: svc, Query: simple.BuildQueryValues(nil)},
+		Response: simple.Response{StatusCode: 200, Body: svc},
 	}
-	response, err := c.Setup().Services(ns).Update(svc)
+	response, err := c.Setup(t).Services(ns).Update(svc)
 	c.Validate(t, response, err)
 }
 
 func TestDeleteService(t *testing.T) {
 	ns := api.NamespaceDefault
-	c := &testClient{
-		Request:  testRequest{Method: "DELETE", Path: testapi.ResourcePath("services", ns, "1"), Query: buildQueryValues(nil)},
-		Response: Response{StatusCode: 200},
+	c := &simple.Client{
+		Request:  simple.Request{Method: "DELETE", Path: testapi.Default.ResourcePath("services", ns, "1"), Query: simple.BuildQueryValues(nil)},
+		Response: simple.Response{StatusCode: 200},
 	}
-	err := c.Setup().Services(ns).Delete("1")
+	err := c.Setup(t).Services(ns).Delete("1")
 	c.Validate(t, nil, err)
 }
 
 func TestServiceProxyGet(t *testing.T) {
 	body := "OK"
 	ns := api.NamespaceDefault
-	c := &testClient{
-		Request: testRequest{
+	c := &simple.Client{
+		Request: simple.Request{
 			Method: "GET",
-			Path:   testapi.ResourcePathWithPrefix("proxy", "services", ns, "service-1") + "/foo",
-			Query:  buildQueryValues(url.Values{"param-name": []string{"param-value"}}),
+			Path:   testapi.Default.ResourcePathWithPrefix("proxy", "services", ns, "service-1") + "/foo",
+			Query:  simple.BuildQueryValues(url.Values{"param-name": []string{"param-value"}}),
 		},
-		Response: Response{StatusCode: 200, RawBody: &body},
+		Response: simple.Response{StatusCode: 200, RawBody: &body},
 	}
-	response, err := c.Setup().Services(ns).ProxyGet("service-1", "foo", map[string]string{"param-name": "param-value"}).DoRaw()
+	response, err := c.Setup(t).Services(ns).ProxyGet("", "service-1", "", "foo", map[string]string{"param-name": "param-value"}).DoRaw()
+	c.ValidateRaw(t, response, err)
+
+	// With scheme and port specified
+	c = &simple.Client{
+		Request: simple.Request{
+			Method: "GET",
+			Path:   testapi.Default.ResourcePathWithPrefix("proxy", "services", ns, "https:service-1:my-port") + "/foo",
+			Query:  simple.BuildQueryValues(url.Values{"param-name": []string{"param-value"}}),
+		},
+		Response: simple.Response{StatusCode: 200, RawBody: &body},
+	}
+	response, err = c.Setup(t).Services(ns).ProxyGet("https", "service-1", "my-port", "foo", map[string]string{"param-name": "param-value"}).DoRaw()
 	c.ValidateRaw(t, response, err)
 }

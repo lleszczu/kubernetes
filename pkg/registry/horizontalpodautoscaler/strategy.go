@@ -20,13 +20,13 @@ import (
 	"fmt"
 
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/expapi"
-	"k8s.io/kubernetes/pkg/expapi/validation"
+	"k8s.io/kubernetes/pkg/apis/extensions"
+	"k8s.io/kubernetes/pkg/apis/extensions/validation"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/runtime"
-	errs "k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 // autoscalerStrategy implements behavior for HorizontalPodAutoscalers
@@ -46,13 +46,20 @@ func (autoscalerStrategy) NamespaceScoped() bool {
 
 // PrepareForCreate clears fields that are not allowed to be set by end users on creation.
 func (autoscalerStrategy) PrepareForCreate(obj runtime.Object) {
-	_ = obj.(*expapi.HorizontalPodAutoscaler)
+	newHPA := obj.(*extensions.HorizontalPodAutoscaler)
+
+	// create cannot set status
+	newHPA.Status = extensions.HorizontalPodAutoscalerStatus{}
 }
 
 // Validate validates a new autoscaler.
-func (autoscalerStrategy) Validate(ctx api.Context, obj runtime.Object) errs.ValidationErrorList {
-	autoscaler := obj.(*expapi.HorizontalPodAutoscaler)
+func (autoscalerStrategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
+	autoscaler := obj.(*extensions.HorizontalPodAutoscaler)
 	return validation.ValidateHorizontalPodAutoscaler(autoscaler)
+}
+
+// Canonicalize normalizes the object after validation.
+func (autoscalerStrategy) Canonicalize(obj runtime.Object) {
 }
 
 // AllowCreateOnUpdate is false for autoscalers.
@@ -62,25 +69,52 @@ func (autoscalerStrategy) AllowCreateOnUpdate() bool {
 
 // PrepareForUpdate clears fields that are not allowed to be set by end users on update.
 func (autoscalerStrategy) PrepareForUpdate(obj, old runtime.Object) {
-	_ = obj.(*expapi.HorizontalPodAutoscaler)
+	newHPA := obj.(*extensions.HorizontalPodAutoscaler)
+	oldHPA := obj.(*extensions.HorizontalPodAutoscaler)
+	// Update is not allowed to set status
+	newHPA.Status = oldHPA.Status
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (autoscalerStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) errs.ValidationErrorList {
-	return validation.ValidateHorizontalPodAutoscalerUpdate(obj.(*expapi.HorizontalPodAutoscaler), old.(*expapi.HorizontalPodAutoscaler))
+func (autoscalerStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
+	return validation.ValidateHorizontalPodAutoscalerUpdate(obj.(*extensions.HorizontalPodAutoscaler), old.(*extensions.HorizontalPodAutoscaler))
 }
 
 func (autoscalerStrategy) AllowUnconditionalUpdate() bool {
 	return true
 }
 
-// MatchAutoscaler returns a generic matcher for a given label and field selector.
+func AutoscalerToSelectableFields(limitRange *extensions.HorizontalPodAutoscaler) fields.Set {
+	return fields.Set{}
+}
+
 func MatchAutoscaler(label labels.Selector, field fields.Selector) generic.Matcher {
-	return generic.MatcherFunc(func(obj runtime.Object) (bool, error) {
-		autoscaler, ok := obj.(*expapi.HorizontalPodAutoscaler)
-		if !ok {
-			return false, fmt.Errorf("not a horizontal pod autoscaler")
-		}
-		return label.Matches(labels.Set(autoscaler.Labels)), nil
-	})
+	return &generic.SelectionPredicate{
+		Label: label,
+		Field: field,
+		GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
+			hpa, ok := obj.(*extensions.HorizontalPodAutoscaler)
+			if !ok {
+				return nil, nil, fmt.Errorf("given object is not a horizontal pod autoscaler.")
+			}
+			return labels.Set(hpa.ObjectMeta.Labels), AutoscalerToSelectableFields(hpa), nil
+		},
+	}
+}
+
+type autoscalerStatusStrategy struct {
+	autoscalerStrategy
+}
+
+var StatusStrategy = autoscalerStatusStrategy{Strategy}
+
+func (autoscalerStatusStrategy) PrepareForUpdate(obj, old runtime.Object) {
+	newAutoscaler := obj.(*extensions.HorizontalPodAutoscaler)
+	oldAutoscaler := old.(*extensions.HorizontalPodAutoscaler)
+	// status changes are not allowed to update spec
+	newAutoscaler.Spec = oldAutoscaler.Spec
+}
+
+func (autoscalerStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
+	return validation.ValidateHorizontalPodAutoscalerStatusUpdate(obj.(*extensions.HorizontalPodAutoscaler), old.(*extensions.HorizontalPodAutoscaler))
 }

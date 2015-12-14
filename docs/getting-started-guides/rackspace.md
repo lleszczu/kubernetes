@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/getting-started-guides/rackspace.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/getting-started-guides/rackspace.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -79,11 +79,12 @@ The current cluster design is inspired by:
 ## Cluster
 
 There is a specific `cluster/rackspace` directory with the scripts for the following steps:
+
 1. A cloud network will be created and all instances will be attached to this network.
   - flanneld uses this network for next hop routing. These routes allow the containers running on each node to communicate with one another on this private network.
 2. A SSH key will be created and uploaded if needed. This key must be used to ssh into the machines (we do not capture the password).
 3. The master server and additional nodes will be created via the `nova` CLI. A `cloud-config.yaml` is generated and provided as user-data with the entire configuration for the systems.
-4. We then boot as many nodes as defined via `$NUM_MINIONS`.
+4. We then boot as many nodes as defined via `$NUM_NODES`.
 
 ## Some notes
 
@@ -91,9 +92,9 @@ There is a specific `cluster/rackspace` directory with the scripts for the follo
 - A number of the items in `config-default.sh` are overridable via environment variables.
 - For older versions please either:
  * Sync back to `v0.9` with `git checkout v0.9`
-  * Download a [snapshot of `v0.9`](https://github.com/GoogleCloudPlatform/kubernetes/archive/v0.9.tar.gz)
+  * Download a [snapshot of `v0.9`](https://github.com/kubernetes/kubernetes/archive/v0.9.tar.gz)
  * Sync back to `v0.3` with `git checkout v0.3`
-  * Download a [snapshot of `v0.3`](https://github.com/GoogleCloudPlatform/kubernetes/archive/v0.3.tar.gz)
+  * Download a [snapshot of `v0.3`](https://github.com/kubernetes/kubernetes/archive/v0.3.tar.gz)
 
 ## Network Design
 

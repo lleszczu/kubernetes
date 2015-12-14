@@ -16,6 +16,7 @@
 package manager
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -126,7 +127,11 @@ func New(memoryCache *memory.InMemoryCache, sysfs sysfs.SysFs, maxHousekeepingIn
 	}
 	glog.Infof("cAdvisor running in container: %q", selfContainer)
 
-	context := fs.Context{DockerRoot: docker.RootDir()}
+	dockerInfo, err := docker.DockerInfo()
+	if err != nil {
+		glog.Warningf("Unable to connect to Docker: %v", err)
+	}
+	context := fs.Context{DockerRoot: docker.RootDir(), DockerInfo: dockerInfo}
 	fsInfo, err := fs.NewFsInfo(context)
 	if err != nil {
 		return nil, err
@@ -380,6 +385,7 @@ func (self *manager) getV2Spec(cinfo *containerInfo) v2.ContainerSpec {
 		HasNetwork:       specV1.HasNetwork,
 		HasDiskIo:        specV1.HasDiskIo,
 		HasCustomMetrics: specV1.HasCustomMetrics,
+		Image:            specV1.Image,
 	}
 	if specV1.HasCpu {
 		specV2.Cpu.Limit = specV1.Cpu.Limit
@@ -736,7 +742,7 @@ func (m *manager) registerCollectors(collectorConfigs map[string]string, cont *c
 
 // Create a container.
 func (m *manager) createContainer(containerName string) error {
-	handler, accept, err := container.NewContainerHandler(containerName)
+	handler, accept, err := container.NewContainerHandler(containerName, m.inHostNamespace)
 	if err != nil {
 		return err
 	}
@@ -1187,19 +1193,13 @@ func (m *manager) DockerInfo() (DockerStatus, error) {
 			out.NumContainers = n
 		}
 	}
-	// cut, trim, cut - Example format:
-	// DriverStatus=[["Root Dir","/var/lib/docker/aufs"],["Backing Filesystem","extfs"],["Dirperm1 Supported","false"]]
 	if val, ok := info["DriverStatus"]; ok {
+		var driverStatus [][]string
+		err = json.Unmarshal([]byte(val), &driverStatus)
 		out.DriverStatus = make(map[string]string)
-		val = strings.TrimPrefix(val, "[[")
-		val = strings.TrimSuffix(val, "]]")
-		vals := strings.Split(val, "],[")
-		for _, v := range vals {
-			kv := strings.Split(v, "\",\"")
-			if len(kv) != 2 {
-				continue
-			} else {
-				out.DriverStatus[strings.Trim(kv[0], "\"")] = strings.Trim(kv[1], "\"")
+		for _, v := range driverStatus {
+			if len(v) == 2 {
+				out.DriverStatus[v[0]] = v[1]
 			}
 		}
 	}

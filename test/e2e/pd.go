@@ -18,8 +18,8 @@ package e2e
 
 import (
 	"fmt"
-	math_rand "math/rand"
-	"os/exec"
+	"google.golang.org/api/googleapi"
+	mathrand "math/rand"
 	"strings"
 	"time"
 
@@ -28,10 +28,10 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/latest"
 	"k8s.io/kubernetes/pkg/api/resource"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/cloudprovider/providers/aws"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
+	awscloud "k8s.io/kubernetes/pkg/cloudprovider/providers/aws"
+	gcecloud "k8s.io/kubernetes/pkg/cloudprovider/providers/gce"
 	"k8s.io/kubernetes/pkg/util"
 )
 
@@ -53,7 +53,7 @@ var _ = Describe("Pod Disks", func() {
 
 		podClient = framework.Client.Pods(framework.Namespace.Name)
 
-		nodes, err := framework.Client.Nodes().List(labels.Everything(), fields.Everything())
+		nodes, err := framework.Client.Nodes().List(api.ListOptions{})
 		expectNoError(err, "Failed to list nodes for e2e cluster.")
 
 		Expect(len(nodes.Items)).To(BeNumerically(">=", 2), "Requires at least 2 nodes")
@@ -61,40 +61,39 @@ var _ = Describe("Pod Disks", func() {
 		host0Name = nodes.Items[0].ObjectMeta.Name
 		host1Name = nodes.Items[1].ObjectMeta.Name
 
-		math_rand.Seed(time.Now().UTC().UnixNano())
+		mathrand.Seed(time.Now().UTC().UnixNano())
 	})
 
 	It("should schedule a pod w/ a RW PD, remove it, then schedule it on another host", func() {
 		SkipUnlessProviderIs("gce", "gke", "aws")
 
 		By("creating PD")
-		diskName, err := createPD()
+		diskName, err := createPDWithRetry()
 		expectNoError(err, "Error creating PD")
 
-		host0Pod := testPDPod(diskName, host0Name, false /* readOnly */, 1 /* numContainers */)
-		host1Pod := testPDPod(diskName, host1Name, false /* readOnly */, 1 /* numContainers */)
+		host0Pod := testPDPod([]string{diskName}, host0Name, false /* readOnly */, 1 /* numContainers */)
+		host1Pod := testPDPod([]string{diskName}, host1Name, false /* readOnly */, 1 /* numContainers */)
+		containerName := "mycontainer"
 
 		defer func() {
-			By("cleaning up PD-RW test environment")
 			// Teardown pods, PD. Ignore errors.
 			// Teardown should do nothing unless test failed.
+			By("cleaning up PD-RW test environment")
 			podClient.Delete(host0Pod.Name, api.NewDeleteOptions(0))
 			podClient.Delete(host1Pod.Name, api.NewDeleteOptions(0))
-			detachPD(host0Name, diskName)
-			detachPD(host1Name, diskName)
-			deletePD(diskName)
+			detachAndDeletePDs(diskName, []string{host0Name, host1Name})
 		}()
 
 		By("submitting host0Pod to kubernetes")
 		_, err = podClient.Create(host0Pod)
 		expectNoError(err, fmt.Sprintf("Failed to create host0Pod: %v", err))
 
-		expectNoError(framework.WaitForPodRunning(host0Pod.Name))
+		expectNoError(framework.WaitForPodRunningSlow(host0Pod.Name))
 
-		testFile := "/testpd/tracker"
-		testFileContents := fmt.Sprintf("%v", math_rand.Int())
+		testFile := "/testpd1/tracker"
+		testFileContents := fmt.Sprintf("%v", mathrand.Int())
 
-		expectNoError(framework.WriteFileViaContainer(host0Pod.Name, "testpd" /* containerName */, testFile, testFileContents))
+		expectNoError(framework.WriteFileViaContainer(host0Pod.Name, containerName, testFile, testFileContents))
 		Logf("Wrote value: %v", testFileContents)
 
 		By("deleting host0Pod")
@@ -104,9 +103,9 @@ var _ = Describe("Pod Disks", func() {
 		_, err = podClient.Create(host1Pod)
 		expectNoError(err, "Failed to create host1Pod")
 
-		expectNoError(framework.WaitForPodRunning(host1Pod.Name))
+		expectNoError(framework.WaitForPodRunningSlow(host1Pod.Name))
 
-		v, err := framework.ReadFileViaContainer(host1Pod.Name, "testpd", testFile)
+		v, err := framework.ReadFileViaContainer(host1Pod.Name, containerName, testFile)
 		expectNoError(err)
 		Logf("Read value: %v", v)
 
@@ -115,9 +114,6 @@ var _ = Describe("Pod Disks", func() {
 		By("deleting host1Pod")
 		expectNoError(podClient.Delete(host1Pod.Name, api.NewDeleteOptions(0)), "Failed to delete host1Pod")
 
-		By(fmt.Sprintf("deleting PD %q", diskName))
-		deletePDWithRetry(diskName)
-
 		return
 	})
 
@@ -125,12 +121,12 @@ var _ = Describe("Pod Disks", func() {
 		SkipUnlessProviderIs("gce", "gke")
 
 		By("creating PD")
-		diskName, err := createPD()
+		diskName, err := createPDWithRetry()
 		expectNoError(err, "Error creating PD")
 
-		rwPod := testPDPod(diskName, host0Name, false /* readOnly */, 1 /* numContainers */)
-		host0ROPod := testPDPod(diskName, host0Name, true /* readOnly */, 1 /* numContainers */)
-		host1ROPod := testPDPod(diskName, host1Name, true /* readOnly */, 1 /* numContainers */)
+		rwPod := testPDPod([]string{diskName}, host0Name, false /* readOnly */, 1 /* numContainers */)
+		host0ROPod := testPDPod([]string{diskName}, host0Name, true /* readOnly */, 1 /* numContainers */)
+		host1ROPod := testPDPod([]string{diskName}, host1Name, true /* readOnly */, 1 /* numContainers */)
 
 		defer func() {
 			By("cleaning up PD-RO test environment")
@@ -139,16 +135,13 @@ var _ = Describe("Pod Disks", func() {
 			podClient.Delete(rwPod.Name, api.NewDeleteOptions(0))
 			podClient.Delete(host0ROPod.Name, api.NewDeleteOptions(0))
 			podClient.Delete(host1ROPod.Name, api.NewDeleteOptions(0))
-
-			detachPD(host0Name, diskName)
-			detachPD(host1Name, diskName)
-			deletePD(diskName)
+			detachAndDeletePDs(diskName, []string{host0Name, host1Name})
 		}()
 
 		By("submitting rwPod to ensure PD is formatted")
 		_, err = podClient.Create(rwPod)
 		expectNoError(err, "Failed to create rwPod")
-		expectNoError(framework.WaitForPodRunning(rwPod.Name))
+		expectNoError(framework.WaitForPodRunningSlow(rwPod.Name))
 		expectNoError(podClient.Delete(rwPod.Name, api.NewDeleteOptions(0)), "Failed to delete host0Pod")
 		expectNoError(waitForPDDetach(diskName, host0Name))
 
@@ -160,39 +153,33 @@ var _ = Describe("Pod Disks", func() {
 		_, err = podClient.Create(host1ROPod)
 		expectNoError(err, "Failed to create host1ROPod")
 
-		expectNoError(framework.WaitForPodRunning(host0ROPod.Name))
+		expectNoError(framework.WaitForPodRunningSlow(host0ROPod.Name))
 
-		expectNoError(framework.WaitForPodRunning(host1ROPod.Name))
+		expectNoError(framework.WaitForPodRunningSlow(host1ROPod.Name))
 
 		By("deleting host0ROPod")
 		expectNoError(podClient.Delete(host0ROPod.Name, api.NewDeleteOptions(0)), "Failed to delete host0ROPod")
 
 		By("deleting host1ROPod")
 		expectNoError(podClient.Delete(host1ROPod.Name, api.NewDeleteOptions(0)), "Failed to delete host1ROPod")
-
-		By(fmt.Sprintf("deleting PD %q", diskName))
-		deletePDWithRetry(diskName)
-
-		expectNoError(err, "Error deleting PD")
 	})
 
 	It("should schedule a pod w/ a RW PD shared between multiple containers, write to PD, delete pod, verify contents, and repeat in rapid succession", func() {
 		SkipUnlessProviderIs("gce", "gke", "aws")
 
 		By("creating PD")
-		diskName, err := createPD()
+		diskName, err := createPDWithRetry()
 		expectNoError(err, "Error creating PD")
 		numContainers := 4
 
-		host0Pod := testPDPod(diskName, host0Name, false /* readOnly */, numContainers)
+		host0Pod := testPDPod([]string{diskName}, host0Name, false /* readOnly */, numContainers)
 
 		defer func() {
 			By("cleaning up PD-RW test environment")
 			// Teardown pods, PD. Ignore errors.
 			// Teardown should do nothing unless test failed.
 			podClient.Delete(host0Pod.Name, api.NewDeleteOptions(0))
-			detachPD(host0Name, diskName)
-			deletePD(diskName)
+			detachAndDeletePDs(diskName, []string{host0Name})
 		}()
 
 		fileAndContentToVerify := make(map[string]string)
@@ -202,34 +189,97 @@ var _ = Describe("Pod Disks", func() {
 			_, err = podClient.Create(host0Pod)
 			expectNoError(err, fmt.Sprintf("Failed to create host0Pod: %v", err))
 
-			expectNoError(framework.WaitForPodRunning(host0Pod.Name))
+			expectNoError(framework.WaitForPodRunningSlow(host0Pod.Name))
 
 			// randomly select a container and read/verify pd contents from it
-			containerName := fmt.Sprintf("testpd%v", math_rand.Intn(numContainers)+1)
+			containerName := fmt.Sprintf("mycontainer%v", mathrand.Intn(numContainers)+1)
 			verifyPDContentsViaContainer(framework, host0Pod.Name, containerName, fileAndContentToVerify)
 
 			// Randomly select a container to write a file to PD from
-			containerName = fmt.Sprintf("testpd%v", math_rand.Intn(numContainers)+1)
-			testFile := fmt.Sprintf("/testpd/tracker%v", i)
-			testFileContents := fmt.Sprintf("%v", math_rand.Int())
+			containerName = fmt.Sprintf("mycontainer%v", mathrand.Intn(numContainers)+1)
+			testFile := fmt.Sprintf("/testpd1/tracker%v", i)
+			testFileContents := fmt.Sprintf("%v", mathrand.Int())
 			fileAndContentToVerify[testFile] = testFileContents
 			expectNoError(framework.WriteFileViaContainer(host0Pod.Name, containerName, testFile, testFileContents))
 			Logf("Wrote value: \"%v\" to PD %q from pod %q container %q", testFileContents, diskName, host0Pod.Name, containerName)
 
 			// Randomly select a container and read/verify pd contents from it
-			containerName = fmt.Sprintf("testpd%v", math_rand.Intn(numContainers)+1)
+			containerName = fmt.Sprintf("mycontainer%v", mathrand.Intn(numContainers)+1)
 			verifyPDContentsViaContainer(framework, host0Pod.Name, containerName, fileAndContentToVerify)
 
 			By("deleting host0Pod")
 			expectNoError(podClient.Delete(host0Pod.Name, api.NewDeleteOptions(0)), "Failed to delete host0Pod")
 		}
+	})
 
-		By(fmt.Sprintf("deleting PD %q", diskName))
-		deletePDWithRetry(diskName)
+	It("should schedule a pod w/two RW PDs both mounted to one container, write to PD, verify contents, delete pod, recreate pod, verify contents, and repeat in rapid succession", func() {
+		SkipUnlessProviderIs("gce", "gke", "aws")
 
-		return
+		By("creating PD1")
+		disk1Name, err := createPDWithRetry()
+		expectNoError(err, "Error creating PD1")
+		By("creating PD2")
+		disk2Name, err := createPDWithRetry()
+		expectNoError(err, "Error creating PD2")
+
+		host0Pod := testPDPod([]string{disk1Name, disk2Name}, host0Name, false /* readOnly */, 1 /* numContainers */)
+
+		defer func() {
+			By("cleaning up PD-RW test environment")
+			// Teardown pods, PD. Ignore errors.
+			// Teardown should do nothing unless test failed.
+			podClient.Delete(host0Pod.Name, api.NewDeleteOptions(0))
+			detachAndDeletePDs(disk1Name, []string{host0Name})
+			detachAndDeletePDs(disk2Name, []string{host0Name})
+		}()
+
+		containerName := "mycontainer"
+		fileAndContentToVerify := make(map[string]string)
+		for i := 0; i < 3; i++ {
+			Logf("PD Read/Writer Iteration #%v", i)
+			By("submitting host0Pod to kubernetes")
+			_, err = podClient.Create(host0Pod)
+			expectNoError(err, fmt.Sprintf("Failed to create host0Pod: %v", err))
+
+			expectNoError(framework.WaitForPodRunningSlow(host0Pod.Name))
+
+			// Read/verify pd contents for both disks from container
+			verifyPDContentsViaContainer(framework, host0Pod.Name, containerName, fileAndContentToVerify)
+
+			// Write a file to both PDs from container
+			testFilePD1 := fmt.Sprintf("/testpd1/tracker%v", i)
+			testFilePD2 := fmt.Sprintf("/testpd2/tracker%v", i)
+			testFilePD1Contents := fmt.Sprintf("%v", mathrand.Int())
+			testFilePD2Contents := fmt.Sprintf("%v", mathrand.Int())
+			fileAndContentToVerify[testFilePD1] = testFilePD1Contents
+			fileAndContentToVerify[testFilePD2] = testFilePD2Contents
+			expectNoError(framework.WriteFileViaContainer(host0Pod.Name, containerName, testFilePD1, testFilePD1Contents))
+			Logf("Wrote value: \"%v\" to PD1 (%q) from pod %q container %q", testFilePD1Contents, disk1Name, host0Pod.Name, containerName)
+			expectNoError(framework.WriteFileViaContainer(host0Pod.Name, containerName, testFilePD2, testFilePD2Contents))
+			Logf("Wrote value: \"%v\" to PD2 (%q) from pod %q container %q", testFilePD2Contents, disk2Name, host0Pod.Name, containerName)
+
+			// Read/verify pd contents for both disks from container
+			verifyPDContentsViaContainer(framework, host0Pod.Name, containerName, fileAndContentToVerify)
+
+			By("deleting host0Pod")
+			expectNoError(podClient.Delete(host0Pod.Name, api.NewDeleteOptions(0)), "Failed to delete host0Pod")
+		}
 	})
 })
+
+func createPDWithRetry() (string, error) {
+	newDiskName := ""
+	var err error
+	for start := time.Now(); time.Since(start) < 180*time.Second; time.Sleep(5 * time.Second) {
+		if newDiskName, err = createPD(); err != nil {
+			Logf("Couldn't create a new PD. Sleeping 5 seconds (%v)", err)
+			continue
+		}
+		Logf("Successfully created a new PD: %q.", newDiskName)
+		break
+	}
+	return newDiskName, err
+}
 
 func deletePDWithRetry(diskName string) {
 	var err error
@@ -238,7 +288,7 @@ func deletePDWithRetry(diskName string) {
 			Logf("Couldn't delete PD %q. Sleeping 5 seconds (%v)", diskName, err)
 			continue
 		}
-		Logf("Deleted PD %v", diskName)
+		Logf("Successfully deleted PD %q.", diskName)
 		break
 	}
 	expectNoError(err, "Error deleting PD")
@@ -260,19 +310,22 @@ func createPD() (string, error) {
 	if testContext.Provider == "gce" || testContext.Provider == "gke" {
 		pdName := fmt.Sprintf("%s-%s", testContext.prefix, string(util.NewUUID()))
 
-		zone := testContext.CloudConfig.Zone
-		// TODO: make this hit the compute API directly instread of shelling out to gcloud.
-		err := exec.Command("gcloud", "compute", "--project="+testContext.CloudConfig.ProjectID, "disks", "create", "--zone="+zone, "--size=10GB", pdName).Run()
+		gceCloud, err := getGCECloud()
+		if err != nil {
+			return "", err
+		}
+
+		err = gceCloud.CreateDisk(pdName, 10 /* sizeGb */)
 		if err != nil {
 			return "", err
 		}
 		return pdName, nil
 	} else {
-		volumes, ok := testContext.CloudConfig.Provider.(aws_cloud.Volumes)
+		volumes, ok := testContext.CloudConfig.Provider.(awscloud.Volumes)
 		if !ok {
 			return "", fmt.Errorf("Provider does not support volumes")
 		}
-		volumeOptions := &aws_cloud.VolumeOptions{}
+		volumeOptions := &awscloud.VolumeOptions{}
 		volumeOptions.CapacityMB = 10 * 1024
 		return volumes.CreateVolume(volumeOptions)
 	}
@@ -280,17 +333,24 @@ func createPD() (string, error) {
 
 func deletePD(pdName string) error {
 	if testContext.Provider == "gce" || testContext.Provider == "gke" {
-		zone := testContext.CloudConfig.Zone
-
-		// TODO: make this hit the compute API directly.
-		cmd := exec.Command("gcloud", "compute", "--project="+testContext.CloudConfig.ProjectID, "disks", "delete", "--zone="+zone, pdName)
-		data, err := cmd.CombinedOutput()
+		gceCloud, err := getGCECloud()
 		if err != nil {
-			Logf("Error deleting PD: %s (%v)", string(data), err)
+			return err
+		}
+
+		err = gceCloud.DeleteDisk(pdName)
+
+		if err != nil {
+			if gerr, ok := err.(*googleapi.Error); ok && len(gerr.Errors) > 0 && gerr.Errors[0].Reason == "notFound" {
+				// PD already exists, ignore error.
+				return nil
+			}
+
+			Logf("Error deleting PD %q: %v", pdName, err)
 		}
 		return err
 	} else {
-		volumes, ok := testContext.CloudConfig.Provider.(aws_cloud.Volumes)
+		volumes, ok := testContext.CloudConfig.Provider.(awscloud.Volumes)
 		if !ok {
 			return fmt.Errorf("Provider does not support volumes")
 		}
@@ -302,12 +362,25 @@ func detachPD(hostName, pdName string) error {
 	if testContext.Provider == "gce" || testContext.Provider == "gke" {
 		instanceName := strings.Split(hostName, ".")[0]
 
-		zone := testContext.CloudConfig.Zone
+		gceCloud, err := getGCECloud()
+		if err != nil {
+			return err
+		}
 
-		// TODO: make this hit the compute API directly.
-		return exec.Command("gcloud", "compute", "--project="+testContext.CloudConfig.ProjectID, "detach-disk", "--zone="+zone, "--disk="+pdName, instanceName).Run()
+		err = gceCloud.DetachDisk(pdName, instanceName)
+		if err != nil {
+			if gerr, ok := err.(*googleapi.Error); ok && strings.Contains(gerr.Message, "Invalid value for field 'disk'") {
+				// PD already detached, ignore error.
+				return nil
+			}
+
+			Logf("Error detaching PD %q: %v", pdName, err)
+		}
+
+		return err
+
 	} else {
-		volumes, ok := testContext.CloudConfig.Provider.(aws_cloud.Volumes)
+		volumes, ok := testContext.CloudConfig.Provider.(awscloud.Volumes)
 		if !ok {
 			return fmt.Errorf("Provider does not support volumes")
 		}
@@ -315,23 +388,22 @@ func detachPD(hostName, pdName string) error {
 	}
 }
 
-func testPDPod(diskName, targetHost string, readOnly bool, numContainers int) *api.Pod {
+func testPDPod(diskNames []string, targetHost string, readOnly bool, numContainers int) *api.Pod {
 	containers := make([]api.Container, numContainers)
 	for i := range containers {
-		containers[i].Name = "testpd"
+		containers[i].Name = "mycontainer"
 		if numContainers > 1 {
-			containers[i].Name = fmt.Sprintf("testpd%v", i+1)
+			containers[i].Name = fmt.Sprintf("mycontainer%v", i+1)
 		}
 
 		containers[i].Image = "gcr.io/google_containers/busybox"
 
 		containers[i].Command = []string{"sleep", "6000"}
 
-		containers[i].VolumeMounts = []api.VolumeMount{
-			{
-				Name:      "testpd",
-				MountPath: "/testpd",
-			},
+		containers[i].VolumeMounts = make([]api.VolumeMount, len(diskNames))
+		for k := range diskNames {
+			containers[i].VolumeMounts[k].Name = fmt.Sprintf("testpd%v", k+1)
+			containers[i].VolumeMounts[k].MountPath = fmt.Sprintf("/testpd%v", k+1)
 		}
 
 		containers[i].Resources.Limits = api.ResourceList{}
@@ -340,9 +412,9 @@ func testPDPod(diskName, targetHost string, readOnly bool, numContainers int) *a
 	}
 
 	pod := &api.Pod{
-		TypeMeta: api.TypeMeta{
+		TypeMeta: unversioned.TypeMeta{
 			Kind:       "Pod",
-			APIVersion: latest.Version,
+			APIVersion: latest.GroupOrDie("").GroupVersion.Version,
 		},
 		ObjectMeta: api.ObjectMeta{
 			Name: "pd-test-" + string(util.NewUUID()),
@@ -354,30 +426,28 @@ func testPDPod(diskName, targetHost string, readOnly bool, numContainers int) *a
 	}
 
 	if testContext.Provider == "gce" || testContext.Provider == "gke" {
-		pod.Spec.Volumes = []api.Volume{
-			{
-				Name: "testpd",
-				VolumeSource: api.VolumeSource{
-					GCEPersistentDisk: &api.GCEPersistentDiskVolumeSource{
-						PDName:   diskName,
-						FSType:   "ext4",
-						ReadOnly: readOnly,
-					},
+		pod.Spec.Volumes = make([]api.Volume, len(diskNames))
+		for k, diskName := range diskNames {
+			pod.Spec.Volumes[k].Name = fmt.Sprintf("testpd%v", k+1)
+			pod.Spec.Volumes[k].VolumeSource = api.VolumeSource{
+				GCEPersistentDisk: &api.GCEPersistentDiskVolumeSource{
+					PDName:   diskName,
+					FSType:   "ext4",
+					ReadOnly: readOnly,
 				},
-			},
+			}
 		}
 	} else if testContext.Provider == "aws" {
-		pod.Spec.Volumes = []api.Volume{
-			{
-				Name: "testpd",
-				VolumeSource: api.VolumeSource{
-					AWSElasticBlockStore: &api.AWSElasticBlockStoreVolumeSource{
-						VolumeID: diskName,
-						FSType:   "ext4",
-						ReadOnly: readOnly,
-					},
+		pod.Spec.Volumes = make([]api.Volume, len(diskNames))
+		for k, diskName := range diskNames {
+			pod.Spec.Volumes[k].Name = fmt.Sprintf("testpd%v", k+1)
+			pod.Spec.Volumes[k].VolumeSource = api.VolumeSource{
+				AWSElasticBlockStore: &api.AWSElasticBlockStoreVolumeSource{
+					VolumeID: diskName,
+					FSType:   "ext4",
+					ReadOnly: readOnly,
 				},
-			},
+			}
 		}
 	} else {
 		panic("Unknown provider: " + testContext.Provider)
@@ -389,19 +459,19 @@ func testPDPod(diskName, targetHost string, readOnly bool, numContainers int) *a
 // Waits for specified PD to to detach from specified hostName
 func waitForPDDetach(diskName, hostName string) error {
 	if testContext.Provider == "gce" || testContext.Provider == "gke" {
-		for start := time.Now(); time.Since(start) < gcePDDetachTimeout; time.Sleep(gcePDDetachPollTime) {
-			zone := testContext.CloudConfig.Zone
+		gceCloud, err := getGCECloud()
+		if err != nil {
+			return err
+		}
 
-			cmd := exec.Command("gcloud", "compute", "--project="+testContext.CloudConfig.ProjectID, "instances", "describe", "--zone="+zone, hostName)
-			data, err := cmd.CombinedOutput()
+		for start := time.Now(); time.Since(start) < gcePDDetachTimeout; time.Sleep(gcePDDetachPollTime) {
+			diskAttached, err := gceCloud.DiskIsAttached(diskName, hostName)
 			if err != nil {
-				Logf("Error waiting for PD %q to detach from node %q. 'gcloud compute instances describe' failed with %s (%v)", diskName, hostName, string(data), err)
+				Logf("Error waiting for PD %q to detach from node %q. 'DiskIsAttached(...)' failed with %v", diskName, hostName, err)
 				return err
 			}
 
-			dataStr := strings.ToLower(string(data))
-			diskName = strings.ToLower(diskName)
-			if !strings.Contains(string(dataStr), diskName) {
+			if !diskAttached {
 				// Specified disk does not appear to be attached to specified node
 				Logf("GCE PD %q appears to have successfully detached from %q.", diskName, hostName)
 				return nil
@@ -414,4 +484,24 @@ func waitForPDDetach(diskName, hostName string) error {
 	}
 
 	return nil
+}
+
+func getGCECloud() (*gcecloud.GCECloud, error) {
+	gceCloud, ok := testContext.CloudConfig.Provider.(*gcecloud.GCECloud)
+
+	if !ok {
+		return nil, fmt.Errorf("failed to convert CloudConfig.Provider to GCECloud: %#v", testContext.CloudConfig.Provider)
+	}
+
+	return gceCloud, nil
+}
+
+func detachAndDeletePDs(diskName string, hosts []string) {
+	for _, host := range hosts {
+		detachPD(host, diskName)
+		By(fmt.Sprintf("Waiting for PD %q to detach from %q", diskName, host))
+		waitForPDDetach(diskName, host)
+	}
+	By(fmt.Sprintf("Deleting PD %q", diskName))
+	deletePDWithRetry(diskName)
 }

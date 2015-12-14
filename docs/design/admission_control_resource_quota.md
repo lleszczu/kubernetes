@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/design/admission_control_resource_quota.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/design/admission_control_resource_quota.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -201,27 +201,28 @@ kubectl is modified to support the **ResourceQuota** resource.
 For example,
 
 ```console
-$ kubectl namespace myspace
-$ kubectl create -f docs/user-guide/resourcequota/quota.yaml
-$ kubectl get quota
-NAME
-quota
-$ kubectl describe quota quota
-Name:                   quota
-Resource                Used    Hard
---------                ----    ----
-cpu                     0m      20
-memory                  0       1Gi
-pods                    5       10
-replicationcontrollers  5       20
-resourcequotas          1       1
-services                3       5
+$ kubectl create -f docs/admin/resourcequota/namespace.yaml
+namespace "quota-example" created
+$ kubectl create -f docs/admin/resourcequota/quota.yaml --namespace=quota-example
+resourcequota "quota" created
+$ kubectl describe quota quota --namespace=quota-example
+Name:                    quota
+Namespace:               quota-example
+Resource                 Used      Hard
+--------                 ----      ----
+cpu                      0         20
+memory                   0         1Gi
+persistentvolumeclaims   0         10
+pods                     0         10
+replicationcontrollers   0         20
+resourcequotas           1         1
+secrets                  1         10
+services                 0         5
 ```
 
 ## More information
 
-See [resource quota document](../admin/resource-quota.md) and the [example of Resource Quota](../user-guide/resourcequota/) for more information.
-
+See [resource quota document](../admin/resource-quota.md) and the [example of Resource Quota](../admin/resourcequota/) for more information.
 
 <!-- BEGIN MUNGE: GENERATED_ANALYTICS -->
 [![Analytics](https://kubernetes-site.appspot.com/UA-36037335-10/GitHub/docs/design/admission_control_resource_quota.md?pixel)]()

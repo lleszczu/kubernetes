@@ -50,6 +50,8 @@ func (self *MockContainerHandler) ContainerReference() (info.ContainerReference,
 	return args.Get(0).(info.ContainerReference), args.Error(1)
 }
 
+func (self *MockContainerHandler) Cleanup() {}
+
 func (self *MockContainerHandler) GetSpec() (info.ContainerSpec, error) {
 	args := self.Called()
 	return args.Get(0).(info.ContainerSpec), args.Error(1)
@@ -109,7 +111,7 @@ func (self *FactoryForMockContainerHandler) String() string {
 	return self.Name
 }
 
-func (self *FactoryForMockContainerHandler) NewContainerHandler(name string) (ContainerHandler, error) {
+func (self *FactoryForMockContainerHandler) NewContainerHandler(name string, inHostNamespace bool) (ContainerHandler, error) {
 	handler := &MockContainerHandler{}
 	if self.PrepareContainerHandlerFunc != nil {
 		self.PrepareContainerHandlerFunc(name, handler)

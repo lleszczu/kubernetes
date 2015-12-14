@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/devel/README.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/devel/README.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -50,6 +50,8 @@ Guide](../admin/README.md).
 * **Faster PR reviews** ([faster_reviews.md](faster_reviews.md)): How to get faster PR reviews.
 
 * **Getting Recent Builds** ([getting-builds.md](getting-builds.md)): How to get recent builds including the latest builds that pass CI.
+
+* **Automated Tools** ([automation.md](automation.md)): Descriptions of the automation that is running on our github repository.
 
 
 ## Setting up your dev environment, coding, and debugging

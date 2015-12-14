@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/user-guide/persistent-volumes.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/user-guide/persistent-volumes.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -108,7 +108,7 @@ The reclaim policy for a `PersistentVolume` tells the cluster what to do with th
 * iSCSI
 * RBD (Ceph Block Device)
 * Glusterfs
-* HostPath (single node testing only)
+* HostPath (single node testing only -- local storage is not supported in any way and WILL NOT WORK in a multi-node cluster)
 
 
 ## Persistent Volumes

@@ -17,13 +17,16 @@ limitations under the License.
 package volume
 
 import (
+	"fmt"
 	"os"
 	"path"
 
 	"k8s.io/kubernetes/pkg/api"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/cloudprovider"
 	"k8s.io/kubernetes/pkg/types"
 	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/io"
 	"k8s.io/kubernetes/pkg/util/mount"
 )
 
@@ -32,10 +35,15 @@ type fakeVolumeHost struct {
 	rootDir    string
 	kubeClient client.Interface
 	pluginMgr  VolumePluginMgr
+	cloud      cloudprovider.Interface
+	mounter    mount.Interface
+	writer     io.Writer
 }
 
 func NewFakeVolumeHost(rootDir string, kubeClient client.Interface, plugins []VolumePlugin) *fakeVolumeHost {
-	host := &fakeVolumeHost{rootDir: rootDir, kubeClient: kubeClient}
+	host := &fakeVolumeHost{rootDir: rootDir, kubeClient: kubeClient, cloud: nil}
+	host.mounter = &mount.FakeMounter{}
+	host.writer = &io.StdWriter{}
 	host.pluginMgr.InitPlugins(plugins, host)
 	return host
 }
@@ -56,20 +64,50 @@ func (f *fakeVolumeHost) GetKubeClient() client.Interface {
 	return f.kubeClient
 }
 
-func (f *fakeVolumeHost) NewWrapperBuilder(spec *Spec, pod *api.Pod, opts VolumeOptions, mounter mount.Interface) (Builder, error) {
-	plug, err := f.pluginMgr.FindPluginBySpec(spec)
-	if err != nil {
-		return nil, err
-	}
-	return plug.NewBuilder(spec, pod, opts, mounter)
+func (f *fakeVolumeHost) GetCloudProvider() cloudprovider.Interface {
+	return f.cloud
 }
 
-func (f *fakeVolumeHost) NewWrapperCleaner(spec *Spec, podUID types.UID, mounter mount.Interface) (Cleaner, error) {
+func (f *fakeVolumeHost) GetMounter() mount.Interface {
+	return f.mounter
+}
+
+func (f *fakeVolumeHost) GetWriter() io.Writer {
+	return f.writer
+}
+
+func (f *fakeVolumeHost) NewWrapperBuilder(spec *Spec, pod *api.Pod, opts VolumeOptions) (Builder, error) {
 	plug, err := f.pluginMgr.FindPluginBySpec(spec)
 	if err != nil {
 		return nil, err
 	}
-	return plug.NewCleaner(spec.Name, podUID, mounter)
+	return plug.NewBuilder(spec, pod, opts)
+}
+
+func (f *fakeVolumeHost) NewWrapperCleaner(spec *Spec, podUID types.UID) (Cleaner, error) {
+	plug, err := f.pluginMgr.FindPluginBySpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	return plug.NewCleaner(spec.Name(), podUID)
+}
+
+// Returns the hostname of the host kubelet is running on
+func (f *fakeVolumeHost) GetHostName() string {
+	return "fakeHostName"
+}
+
+func ProbeVolumePlugins(config VolumeConfig) []VolumePlugin {
+	if _, ok := config.OtherAttributes["fake-property"]; ok {
+		return []VolumePlugin{
+			&FakeVolumePlugin{
+				PluginName: "fake-plugin",
+				Host:       nil,
+				// SomeFakeProperty: config.OtherAttributes["fake-property"] -- string, may require parsing by plugin
+			},
+		}
+	}
+	return []VolumePlugin{&FakeVolumePlugin{PluginName: "fake-plugin"}}
 }
 
 // FakeVolumePlugin is useful for testing.  It tries to be a fully compliant
@@ -79,10 +117,13 @@ func (f *fakeVolumeHost) NewWrapperCleaner(spec *Spec, podUID types.UID, mounter
 type FakeVolumePlugin struct {
 	PluginName string
 	Host       VolumeHost
+	Config     VolumeConfig
 }
 
 var _ VolumePlugin = &FakeVolumePlugin{}
 var _ RecyclableVolumePlugin = &FakeVolumePlugin{}
+var _ DeletableVolumePlugin = &FakeVolumePlugin{}
+var _ ProvisionableVolumePlugin = &FakeVolumePlugin{}
 
 func (plugin *FakeVolumePlugin) Init(host VolumeHost) {
 	plugin.Host = host
@@ -93,20 +134,28 @@ func (plugin *FakeVolumePlugin) Name() string {
 }
 
 func (plugin *FakeVolumePlugin) CanSupport(spec *Spec) bool {
-	// TODO: maybe pattern-match on spec.Name to decide?
+	// TODO: maybe pattern-match on spec.Name() to decide?
 	return true
 }
 
-func (plugin *FakeVolumePlugin) NewBuilder(spec *Spec, pod *api.Pod, opts VolumeOptions, mounter mount.Interface) (Builder, error) {
-	return &FakeVolume{pod.UID, spec.Name, plugin}, nil
+func (plugin *FakeVolumePlugin) NewBuilder(spec *Spec, pod *api.Pod, opts VolumeOptions) (Builder, error) {
+	return &FakeVolume{pod.UID, spec.Name(), plugin, MetricsNil{}}, nil
 }
 
-func (plugin *FakeVolumePlugin) NewCleaner(volName string, podUID types.UID, mounter mount.Interface) (Cleaner, error) {
-	return &FakeVolume{podUID, volName, plugin}, nil
+func (plugin *FakeVolumePlugin) NewCleaner(volName string, podUID types.UID) (Cleaner, error) {
+	return &FakeVolume{podUID, volName, plugin, MetricsNil{}}, nil
 }
 
 func (plugin *FakeVolumePlugin) NewRecycler(spec *Spec) (Recycler, error) {
-	return &FakeRecycler{"/attributesTransferredFromSpec"}, nil
+	return &fakeRecycler{"/attributesTransferredFromSpec", MetricsNil{}}, nil
+}
+
+func (plugin *FakeVolumePlugin) NewDeleter(spec *Spec) (Deleter, error) {
+	return &FakeDeleter{"/attributesTransferredFromSpec", MetricsNil{}}, nil
+}
+
+func (plugin *FakeVolumePlugin) NewProvisioner(options VolumeOptions) (Provisioner, error) {
+	return &FakeProvisioner{options, plugin.Host}, nil
 }
 
 func (plugin *FakeVolumePlugin) GetAccessModes() []api.PersistentVolumeAccessMode {
@@ -117,6 +166,16 @@ type FakeVolume struct {
 	PodUID  types.UID
 	VolName string
 	Plugin  *FakeVolumePlugin
+	MetricsNil
+}
+
+func (_ *FakeVolume) GetAttributes() Attributes {
+	return Attributes{
+		ReadOnly:                    false,
+		Managed:                     true,
+		SupportsOwnershipManagement: true,
+		SupportsSELinux:             true,
+	}
 }
 
 func (fv *FakeVolume) SetUp() error {
@@ -125,10 +184,6 @@ func (fv *FakeVolume) SetUp() error {
 
 func (fv *FakeVolume) SetUpAt(dir string) error {
 	return os.MkdirAll(dir, 0750)
-}
-
-func (fv *FakeVolume) IsReadOnly() bool {
-	return false
 }
 
 func (fv *FakeVolume) GetPath() string {
@@ -143,15 +198,72 @@ func (fv *FakeVolume) TearDownAt(dir string) error {
 	return os.RemoveAll(dir)
 }
 
-type FakeRecycler struct {
+type fakeRecycler struct {
 	path string
+	MetricsNil
 }
 
-func (fr *FakeRecycler) Recycle() error {
+func (fr *fakeRecycler) Recycle() error {
 	// nil is success, else error
 	return nil
 }
 
-func (fr *FakeRecycler) GetPath() string {
+func (fr *fakeRecycler) GetPath() string {
 	return fr.path
+}
+
+func NewFakeRecycler(spec *Spec, host VolumeHost, config VolumeConfig) (Recycler, error) {
+	if spec.PersistentVolume == nil || spec.PersistentVolume.Spec.HostPath == nil {
+		return nil, fmt.Errorf("fakeRecycler only supports spec.PersistentVolume.Spec.HostPath")
+	}
+	return &fakeRecycler{
+		path: spec.PersistentVolume.Spec.HostPath.Path,
+	}, nil
+}
+
+type FakeDeleter struct {
+	path string
+	MetricsNil
+}
+
+func (fd *FakeDeleter) Delete() error {
+	// nil is success, else error
+	return nil
+}
+
+func (fd *FakeDeleter) GetPath() string {
+	return fd.path
+}
+
+type FakeProvisioner struct {
+	Options VolumeOptions
+	Host    VolumeHost
+}
+
+func (fc *FakeProvisioner) NewPersistentVolumeTemplate() (*api.PersistentVolume, error) {
+	fullpath := fmt.Sprintf("/tmp/hostpath_pv/%s", util.NewUUID())
+	return &api.PersistentVolume{
+		ObjectMeta: api.ObjectMeta{
+			GenerateName: "pv-fakeplugin-",
+			Annotations: map[string]string{
+				"kubernetes.io/createdby": "fakeplugin-provisioner",
+			},
+		},
+		Spec: api.PersistentVolumeSpec{
+			PersistentVolumeReclaimPolicy: fc.Options.PersistentVolumeReclaimPolicy,
+			AccessModes:                   fc.Options.AccessModes,
+			Capacity: api.ResourceList{
+				api.ResourceName(api.ResourceStorage): fc.Options.Capacity,
+			},
+			PersistentVolumeSource: api.PersistentVolumeSource{
+				HostPath: &api.HostPathVolumeSource{
+					Path: fullpath,
+				},
+			},
+		},
+	}, nil
+}
+
+func (fc *FakeProvisioner) Provision(pv *api.PersistentVolume) error {
+	return nil
 }

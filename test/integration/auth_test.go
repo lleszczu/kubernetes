@@ -44,7 +44,6 @@ import (
 	"k8s.io/kubernetes/pkg/auth/authorizer"
 	"k8s.io/kubernetes/pkg/auth/authorizer/abac"
 	"k8s.io/kubernetes/pkg/auth/user"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/master"
 	"k8s.io/kubernetes/plugin/pkg/admission/admit"
 	"k8s.io/kubernetes/plugin/pkg/auth/authenticator/token/tokentest"
@@ -65,22 +64,22 @@ func getTestTokenAuth() authenticator.Request {
 }
 
 func path(resource, namespace, name string) string {
-	return testapi.ResourcePath(resource, namespace, name)
+	return testapi.Default.ResourcePath(resource, namespace, name)
 }
 
 func pathWithPrefix(prefix, resource, namespace, name string) string {
-	return testapi.ResourcePathWithPrefix(prefix, resource, namespace, name)
+	return testapi.Default.ResourcePathWithPrefix(prefix, resource, namespace, name)
 }
 
 func timeoutPath(resource, namespace, name string) string {
-	return addTimeoutFlag(testapi.ResourcePath(resource, namespace, name))
+	return addTimeoutFlag(testapi.Default.ResourcePath(resource, namespace, name))
 }
 
 // Bodies for requests used in subsequent tests.
 var aPod string = `
 {
   "kind": "Pod",
-  "apiVersion": "` + testapi.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a",
     "creationTimestamp": null%s
@@ -98,7 +97,7 @@ var aPod string = `
 var aRC string = `
 {
   "kind": "ReplicationController",
-  "apiVersion": "` + testapi.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a",
     "labels": {
@@ -131,7 +130,7 @@ var aRC string = `
 var aService string = `
 {
   "kind": "Service",
-  "apiVersion": "` + testapi.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a",
     "labels": {
@@ -155,7 +154,7 @@ var aService string = `
 var aNode string = `
 {
   "kind": "Node",
-  "apiVersion": "` + testapi.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a"%s
   },
@@ -167,12 +166,12 @@ var aNode string = `
 var aEvent string = `
 {
   "kind": "Event",
-  "apiVersion": "` + testapi.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a"%s
   },
   "involvedObject": {
-    "kind": "Node",
+    "kind": "Pod",
     "namespace": "default",
     "name": "a",
     "apiVersion": "v1"
@@ -183,7 +182,7 @@ var aEvent string = `
 var aBinding string = `
 {
   "kind": "Binding",
-  "apiVersion": "` + testapi.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a"%s
   },
@@ -206,7 +205,7 @@ var emptyEndpoints string = `
 var aEndpoints string = `
 {
   "kind": "Endpoints",
-  "apiVersion": "` + testapi.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a"%s
   },
@@ -231,7 +230,7 @@ var aEndpoints string = `
 var deleteNow string = `
 {
   "kind": "DeleteOptions",
-  "apiVersion": "` + testapi.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "gracePeriodSeconds": 0%s
 }
 `
@@ -330,7 +329,7 @@ func getTestRequests() []struct {
 		{"GET", path("endpoints", api.NamespaceDefault, "a"), "", code200},
 		{"DELETE", timeoutPath("endpoints", api.NamespaceDefault, "a"), "", code200},
 
-		// Normal methods on minions
+		// Normal methods on nodes
 		{"GET", path("nodes", "", ""), "", code200},
 		{"POST", timeoutPath("nodes", "", ""), aNode, code201},
 		{"PUT", timeoutPath("nodes", "", "a"), aNode, code200},
@@ -364,7 +363,7 @@ func getTestRequests() []struct {
 		{"GET", pathWithPrefix("proxy", "nodes", api.NamespaceDefault, "a"), "", code404},
 		{"GET", pathWithPrefix("redirect", "nodes", api.NamespaceDefault, "a"), "", code404},
 		// TODO: test .../watch/..., which doesn't end before the test timeout.
-		// TODO: figure out how to create a minion so that it can successfully proxy/redirect.
+		// TODO: figure out how to create a node so that it can successfully proxy/redirect.
 
 		// Non-object endpoints
 		{"GET", "/", "", code200},
@@ -386,27 +385,14 @@ func TestAuthModeAlwaysAllow(t *testing.T) {
 	framework.DeleteAllEtcdKeys()
 
 	// Set up a master
-	etcdStorage, err := framework.NewEtcdStorage()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	var m *master.Master
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
 	defer s.Close()
 
-	m = master.New(&master.Config{
-		DatabaseStorage:       etcdStorage,
-		KubeletClient:         client.FakeKubeletClient{},
-		EnableCoreControllers: true,
-		EnableLogsSupport:     false,
-		EnableUISupport:       false,
-		EnableIndex:           true,
-		APIPrefix:             "/api",
-		Authorizer:            apiserver.NewAlwaysAllowAuthorizer(),
-		AdmissionControl:      admit.NewAlwaysAdmit(),
-	})
+	masterConfig := framework.NewIntegrationTestMasterConfig()
+	m = master.New(masterConfig)
 
 	transport := http.DefaultTransport
 	previousResourceVersion := make(map[string]float64)
@@ -501,28 +487,15 @@ func TestAuthModeAlwaysDeny(t *testing.T) {
 	framework.DeleteAllEtcdKeys()
 
 	// Set up a master
-	etcdStorage, err := framework.NewEtcdStorage()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
 	var m *master.Master
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
 	defer s.Close()
 
-	m = master.New(&master.Config{
-		DatabaseStorage:       etcdStorage,
-		KubeletClient:         client.FakeKubeletClient{},
-		EnableCoreControllers: true,
-		EnableLogsSupport:     false,
-		EnableUISupport:       false,
-		EnableIndex:           true,
-		APIPrefix:             "/api",
-		Authorizer:            apiserver.NewAlwaysDenyAuthorizer(),
-		AdmissionControl:      admit.NewAlwaysAdmit(),
-	})
+	masterConfig := framework.NewIntegrationTestMasterConfig()
+	masterConfig.Authorizer = apiserver.NewAlwaysDenyAuthorizer()
+	m = master.New(masterConfig)
 
 	transport := http.DefaultTransport
 
@@ -568,29 +541,17 @@ func TestAliceNotForbiddenOrUnauthorized(t *testing.T) {
 	// This file has alice and bob in it.
 
 	// Set up a master
-	etcdStorage, err := framework.NewEtcdStorage()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
 	var m *master.Master
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
 	defer s.Close()
 
-	m = master.New(&master.Config{
-		DatabaseStorage:       etcdStorage,
-		KubeletClient:         client.FakeKubeletClient{},
-		EnableCoreControllers: true,
-		EnableLogsSupport:     false,
-		EnableUISupport:       false,
-		EnableIndex:           true,
-		APIPrefix:             "/api",
-		Authenticator:         getTestTokenAuth(),
-		Authorizer:            allowAliceAuthorizer{},
-		AdmissionControl:      admit.NewAlwaysAdmit(),
-	})
+	masterConfig := framework.NewIntegrationTestMasterConfig()
+	masterConfig.Authenticator = getTestTokenAuth()
+	masterConfig.Authorizer = allowAliceAuthorizer{}
+	masterConfig.AdmissionControl = admit.NewAlwaysAdmit()
+	m = master.New(masterConfig)
 
 	previousResourceVersion := make(map[string]float64)
 	transport := http.DefaultTransport
@@ -655,29 +616,16 @@ func TestBobIsForbidden(t *testing.T) {
 	framework.DeleteAllEtcdKeys()
 
 	// This file has alice and bob in it.
-	etcdStorage, err := framework.NewEtcdStorage()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
 	var m *master.Master
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
 	defer s.Close()
 
-	m = master.New(&master.Config{
-		DatabaseStorage:       etcdStorage,
-		KubeletClient:         client.FakeKubeletClient{},
-		EnableCoreControllers: true,
-		EnableLogsSupport:     false,
-		EnableUISupport:       false,
-		EnableIndex:           true,
-		APIPrefix:             "/api",
-		Authenticator:         getTestTokenAuth(),
-		Authorizer:            allowAliceAuthorizer{},
-		AdmissionControl:      admit.NewAlwaysAdmit(),
-	})
+	masterConfig := framework.NewIntegrationTestMasterConfig()
+	masterConfig.Authenticator = getTestTokenAuth()
+	masterConfig.Authorizer = allowAliceAuthorizer{}
+	m = master.New(masterConfig)
 
 	transport := http.DefaultTransport
 
@@ -716,29 +664,16 @@ func TestUnknownUserIsUnauthorized(t *testing.T) {
 	// This file has alice and bob in it.
 
 	// Set up a master
-	etcdStorage, err := framework.NewEtcdStorage()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
 	var m *master.Master
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
 	defer s.Close()
 
-	m = master.New(&master.Config{
-		DatabaseStorage:       etcdStorage,
-		KubeletClient:         client.FakeKubeletClient{},
-		EnableCoreControllers: true,
-		EnableLogsSupport:     false,
-		EnableUISupport:       false,
-		EnableIndex:           true,
-		APIPrefix:             "/api",
-		Authenticator:         getTestTokenAuth(),
-		Authorizer:            allowAliceAuthorizer{},
-		AdmissionControl:      admit.NewAlwaysAdmit(),
-	})
+	masterConfig := framework.NewIntegrationTestMasterConfig()
+	masterConfig.Authenticator = getTestTokenAuth()
+	masterConfig.Authorizer = allowAliceAuthorizer{}
+	m = master.New(masterConfig)
 
 	transport := http.DefaultTransport
 
@@ -787,17 +722,86 @@ func newAuthorizerWithContents(t *testing.T, contents string) authorizer.Authori
 	return pl
 }
 
+type trackingAuthorizer struct {
+	requestAttributes []authorizer.Attributes
+}
+
+func (a *trackingAuthorizer) Authorize(attributes authorizer.Attributes) error {
+	a.requestAttributes = append(a.requestAttributes, attributes)
+	return nil
+}
+
+// TestAuthorizationAttributeDetermination tests that authorization attributes are built correctly
+func TestAuthorizationAttributeDetermination(t *testing.T) {
+	framework.DeleteAllEtcdKeys()
+
+	trackingAuthorizer := &trackingAuthorizer{}
+
+	var m *master.Master
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		m.Handler.ServeHTTP(w, req)
+	}))
+	defer s.Close()
+
+	masterConfig := framework.NewIntegrationTestMasterConfig()
+	masterConfig.Authenticator = getTestTokenAuth()
+	masterConfig.Authorizer = trackingAuthorizer
+	m = master.New(masterConfig)
+
+	transport := http.DefaultTransport
+
+	requests := map[string]struct {
+		verb               string
+		URL                string
+		expectedAttributes authorizer.Attributes
+	}{
+		"prefix/version/resource":       {"GET", "/api/v1/pods", authorizer.AttributesRecord{APIGroup: "", Resource: "pods"}},
+		"prefix/group/version/resource": {"GET", "/apis/extensions/v1/pods", authorizer.AttributesRecord{APIGroup: "extensions", Resource: "pods"}},
+	}
+
+	currentAuthorizationAttributesIndex := 0
+
+	for testName, r := range requests {
+		token := BobToken
+		req, err := http.NewRequest(r.verb, s.URL+r.URL, nil)
+		if err != nil {
+			t.Logf("case %v", testName)
+			t.Fatalf("unexpected error: %v", err)
+		}
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+		func() {
+			resp, err := transport.RoundTrip(req)
+			defer resp.Body.Close()
+			if err != nil {
+				t.Logf("case %v", r)
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			found := false
+			for i := currentAuthorizationAttributesIndex; i < len(trackingAuthorizer.requestAttributes); i++ {
+				if trackingAuthorizer.requestAttributes[i].GetAPIGroup() == r.expectedAttributes.GetAPIGroup() &&
+					trackingAuthorizer.requestAttributes[i].GetResource() == r.expectedAttributes.GetResource() {
+					found = true
+					break
+				}
+
+				t.Logf("%#v did not match %#v", r.expectedAttributes, trackingAuthorizer.requestAttributes[i].(*authorizer.AttributesRecord))
+			}
+			if !found {
+				t.Errorf("did not find %#v in %#v", r.expectedAttributes, trackingAuthorizer.requestAttributes[currentAuthorizationAttributesIndex:])
+			}
+
+			currentAuthorizationAttributesIndex = len(trackingAuthorizer.requestAttributes)
+		}()
+	}
+}
+
 // TestNamespaceAuthorization tests that authorization can be controlled
 // by namespace.
 func TestNamespaceAuthorization(t *testing.T) {
 	framework.DeleteAllEtcdKeys()
 
 	// This file has alice and bob in it.
-	etcdStorage, err := framework.NewEtcdStorage()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
 	a := newAuthorizerWithContents(t, `{"namespace": "foo"}
 `)
 
@@ -807,18 +811,10 @@ func TestNamespaceAuthorization(t *testing.T) {
 	}))
 	defer s.Close()
 
-	m = master.New(&master.Config{
-		DatabaseStorage:       etcdStorage,
-		KubeletClient:         client.FakeKubeletClient{},
-		EnableCoreControllers: true,
-		EnableLogsSupport:     false,
-		EnableUISupport:       false,
-		EnableIndex:           true,
-		APIPrefix:             "/api",
-		Authenticator:         getTestTokenAuth(),
-		Authorizer:            a,
-		AdmissionControl:      admit.NewAlwaysAdmit(),
-	})
+	masterConfig := framework.NewIntegrationTestMasterConfig()
+	masterConfig.Authenticator = getTestTokenAuth()
+	masterConfig.Authorizer = a
+	m = master.New(masterConfig)
 
 	previousResourceVersion := make(map[string]float64)
 	transport := http.DefaultTransport
@@ -908,11 +904,6 @@ func TestKindAuthorization(t *testing.T) {
 	// This file has alice and bob in it.
 
 	// Set up a master
-	etcdStorage, err := framework.NewEtcdStorage()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
 	a := newAuthorizerWithContents(t, `{"resource": "services"}
 `)
 
@@ -922,18 +913,10 @@ func TestKindAuthorization(t *testing.T) {
 	}))
 	defer s.Close()
 
-	m = master.New(&master.Config{
-		DatabaseStorage:       etcdStorage,
-		KubeletClient:         client.FakeKubeletClient{},
-		EnableCoreControllers: true,
-		EnableLogsSupport:     false,
-		EnableUISupport:       false,
-		EnableIndex:           true,
-		APIPrefix:             "/api",
-		Authenticator:         getTestTokenAuth(),
-		Authorizer:            a,
-		AdmissionControl:      admit.NewAlwaysAdmit(),
-	})
+	masterConfig := framework.NewIntegrationTestMasterConfig()
+	masterConfig.Authenticator = getTestTokenAuth()
+	masterConfig.Authorizer = a
+	m = master.New(masterConfig)
 
 	previousResourceVersion := make(map[string]float64)
 	transport := http.DefaultTransport
@@ -1011,11 +994,6 @@ func TestReadOnlyAuthorization(t *testing.T) {
 	// This file has alice and bob in it.
 
 	// Set up a master
-	etcdStorage, err := framework.NewEtcdStorage()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
 	a := newAuthorizerWithContents(t, `{"readonly": true}`)
 
 	var m *master.Master
@@ -1024,18 +1002,11 @@ func TestReadOnlyAuthorization(t *testing.T) {
 	}))
 	defer s.Close()
 
-	m = master.New(&master.Config{
-		DatabaseStorage:       etcdStorage,
-		KubeletClient:         client.FakeKubeletClient{},
-		EnableCoreControllers: true,
-		EnableLogsSupport:     false,
-		EnableUISupport:       false,
-		EnableIndex:           true,
-		APIPrefix:             "/api",
-		Authenticator:         getTestTokenAuth(),
-		Authorizer:            a,
-		AdmissionControl:      admit.NewAlwaysAdmit(),
-	})
+	masterConfig := framework.NewIntegrationTestMasterConfig()
+	masterConfig.Authenticator = getTestTokenAuth()
+	masterConfig.Authorizer = a
+
+	m = master.New(masterConfig)
 
 	transport := http.DefaultTransport
 

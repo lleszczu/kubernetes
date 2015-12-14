@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/getting-started-guides/ubuntu.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/getting-started-guides/ubuntu.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -36,11 +36,13 @@ Kubernetes Deployment On Bare-metal Ubuntu Nodes
 - [Introduction](#introduction)
 - [Prerequisites](#prerequisites)
 - [Starting a Cluster](#starting-a-cluster)
-    - [Download binaries](#download-binaries)
+    - [Set up working directory](#set-up-working-directory)
     - [Configure and start the kubernetes cluster](#configure-and-start-the-kubernetes-cluster)
     - [Test it out](#test-it-out)
     - [Deploy addons](#deploy-addons)
     - [Trouble shooting](#trouble-shooting)
+- [Upgrading a Cluster](#upgrading-a-cluster)
+    - [Test it out](#test-it-out-ii)
 
 ## Introduction
 
@@ -54,42 +56,50 @@ work, which has been merge into this document.
 ## Prerequisites
 
 1. The nodes have installed docker version 1.2+ and bridge-utils to manipulate linux bridge.
-2. All machines can communicate with each other, no need to connect Internet (should use
-private docker registry in this case).
+2. All machines can communicate with each other. Master node needs to be connected to the
+Internet to download the necessary files, while worker nodes do not.
 3. These guide is tested OK on Ubuntu 14.04 LTS 64bit server, but it can not work with
-Ubuntu 15 which use systemd instead of upstart. We are working around fixing this.
-4. Dependencies of this guide: etcd-2.0.12, flannel-0.4.0, k8s-1.0.3, may work with higher versions.
+Ubuntu 15 which uses systemd instead of upstart.
+4. Dependencies of this guide: etcd-2.2.1, flannel-0.5.5, k8s-1.1.2, may work with higher versions.
 5. All the remote servers can be ssh logged in without a password by using key authentication.
 
 
-### Starting a Cluster
+## Starting a Cluster
 
-#### Download binaries
+### Set up working directory
 
-First clone the kubernetes github repo
-
-``` console
-$ git clone https://github.com/GoogleCloudPlatform/kubernetes.git
-```
-
-Then download all the needed binaries into given directory (cluster/ubuntu/binaries)
+Clone the kubernetes github repo locally
 
 ``` console
-$ cd kubernetes/cluster/ubuntu
-$ ./build.sh
+$ git clone https://github.com/kubernetes/kubernetes.git
 ```
 
+#### Configure and start the Kubernetes cluster
+
+The startup process will first download all the required binaries automatically.
+By default etcd version is 2.2.1, flannel version is 0.5.5 and k8s version is 1.1.2.
 You can customize your etcd version, flannel version, k8s version by changing corresponding variables
-`ETCD_VERSION` , `FLANNEL_VERSION` and `K8S_VERSION` in build.sh, by default etcd version is 2.0.12,
-flannel version is 0.4.0 and k8s version is 1.0.3.
+`ETCD_VERSION` , `FLANNEL_VERSION` and `KUBE_VERSION` like following.
 
-Make sure that the involved binaries are located properly in the binaries/master
-or binaries/minion directory before you go ahead to the next step .
+```console
+$ export KUBE_VERSION=1.0.5
+$ export FLANNEL_VERSION=0.5.0
+$ export ETCD_VERSION=2.2.0
+```
+
+**Note**
+
+For users who want to bring up a cluster with k8s version v1.1.1, `controller manager` may fail to start
+due to [a known issue](https://github.com/kubernetes/kubernetes/issues/17109). You could raise it
+up manually by using following command on the remote master server. Note that
+you should do this only after `api-server` is up. Moreover this issue is fixed in v1.1.2.
+
+```console
+$ sudo service kube-controller-manager start
+```
 
 Note that we use flannel here to set up overlay network, yet it's optional. Actually you can build up k8s
 cluster natively, or use flannel, Open vSwitch or any other SDN tool you like.
-
-#### Configure and start the Kubernetes cluster
 
 An example cluster is listed below:
 
@@ -99,27 +109,27 @@ An example cluster is listed below:
 |10.10.103.162|   node   |
 |10.10.103.250| both master and node|
 
-First configure the cluster information in cluster/ubuntu/config-default.sh, below is a simple sample.
+First configure the cluster information in cluster/ubuntu/config-default.sh, following is a simple sample.
 
 ```sh
 export nodes="vcap@10.10.103.250 vcap@10.10.103.162 vcap@10.10.103.223"
 
 export role="ai i i"
 
-export NUM_MINIONS=${NUM_MINIONS:-3}
+export NUM_NODES=${NUM_NODES:-3}
 
 export SERVICE_CLUSTER_IP_RANGE=192.168.3.0/24
 
 export FLANNEL_NET=172.16.0.0/16
 ```
 
-The first variable `nodes` defines all your cluster nodes, MASTER node comes first and
+The first variable `nodes` defines all your cluster nodes, master node comes first and
 separated with blank space like `<user_1@ip_1> <user_2@ip_2> <user_3@ip_3> `
 
 Then the `role` variable defines the role of above machine in the same order, "ai" stands for machine
 acts as both master and node, "a" stands for master, "i" stands for node.
 
-The `NUM_MINIONS` variable defines the total number of nodes.
+The `NUM_NODES` variable defines the total number of nodes.
 
 The `SERVICE_CLUSTER_IP_RANGE` variable defines the kubernetes service IP range. Please make sure
 that you do have a valid private ip range defined here, because some IaaS provider may reserve private ips.
@@ -135,28 +145,35 @@ that conflicts with your own private network range.
 The `FLANNEL_NET` variable defines the IP range used for flannel overlay network,
 should not conflict with above `SERVICE_CLUSTER_IP_RANGE`.
 
-After all the above variables being set correctly, we can use following command in cluster/ directory to bring up the whole cluster.
+**Note:** When deploying, master needs to be connected to the Internet to download the necessary files.
+If your machines are located in a private network that need proxy setting to connect the Internet,
+you can set the config `PROXY_SETTING` in cluster/ubuntu/config-default.sh such as:
+
+     PROXY_SETTING="http_proxy=http://server:port https_proxy=https://server:port"
+
+After all the above variables being set correctly, we can use following command in `cluster/` directory to
+bring up the whole cluster.
 
 `$ KUBERNETES_PROVIDER=ubuntu ./kube-up.sh`
 
-The scripts automatically scp binaries and config files to all the machines and start the k8s service on them.
-The only thing you need to do is to type the sudo password when promoted.
+The scripts automatically `scp` binaries and config files to all the machines and start kubernetes
+service on them. The only thing you need to do is to type the sudo password when promoted.
 
 ```console
-Deploying minion on machine 10.10.103.223
+Deploying node on machine 10.10.103.223
 ...
-[sudo] password to copy files and start minion: 
+[sudo] password to start node: 
 ```
 
-If all things goes right, you will see the below message from console indicating the k8s is up.
+If everything works correctly, you will see the following message from console indicating the k8s cluster is up.
 
 ```console
 Cluster validation succeeded
 ```
 
-#### Test it out
+### Test it out
 
-You can use `kubectl` command to check if the newly created k8s is working correctly.
+You can use `kubectl` command to check if the newly created cluster is working correctly.
 The `kubectl` binary is under the `cluster/ubuntu/binaries` directory.
 You can make it available via PATH, then you can use the below command smoothly.
 
@@ -170,10 +187,10 @@ NAME            LABELS                                 STATUS
 10.10.103.250   kubernetes.io/hostname=10.10.103.250   Ready
 ```
 
-Also you can run Kubernetes [guest-example](../../examples/guestbook/) to build a redis backend cluster on the k8s．
+Also you can run Kubernetes [guest-example](../../examples/guestbook/) to build a redis backend cluster．
 
 
-#### Deploy addons
+### Deploy addons
 
 Assuming you have a starting cluster now, this section will tell you how to deploy addons like DNS
 and UI onto the existing cluster.
@@ -208,7 +225,7 @@ $ KUBERNETES_PROVIDER=ubuntu ./deployAddons.sh
 
 After some time, you can use `$ kubectl get pods --namespace=kube-system` to see the DNS and UI pods are running in the cluster.
 
-#### On going
+### On going
 
 We are working on these features which we'd like to let everybody know:
 
@@ -216,34 +233,82 @@ We are working on these features which we'd like to let everybody know:
 to eliminate OS-distro differences.
 2. Tearing Down scripts: clear and re-create the whole stack by one click.
 
-#### Trouble shooting
+### Troubleshooting
 
 Generally, what this approach does is quite simple:
 
-1. Download and copy binaries and configuration files to proper directories on every node
-2. Configure `etcd` using IPs based on input from user
-3. Create and start flannel network
+1. Download and copy binaries and configuration files to proper directories on every node.
+2. Configure `etcd` for master node using IPs based on input from user.
+3. Create and start flannel network for worker nodes.
 
-So if you encounter a problem, **check etcd configuration first**
-
-Please try:
+So if you encounter a problem, check etcd configuration of master node first.
 
 1. Check `/var/log/upstart/etcd.log` for suspicious etcd log
-2. Check `/etc/default/etcd`, as we do not have much input validation, a right config should be like:
+2. You may find following commands useful, the former one to bring down the cluster, while the latter one could start it again.
 
-	```sh
-	ETCD_OPTS="-name infra1 -initial-advertise-peer-urls <http://ip_of_this_node:2380> -listen-peer-urls <http://ip_of_this_node:2380> -initial-cluster-token etcd-cluster-1 -initial-cluster infra1=<http://ip_of_this_node:2380>,infra2=<http://ip_of_another_node:2380>,infra3=<http://ip_of_another_node:2380> -initial-cluster-state new"
-	```
+```console
+$ KUBERNETES_PROVIDER=ubuntu ./kube-down.sh
+$ KUBERNETES_PROVIDER=ubuntu ./kube-up.sh
+```
 
-3. You may find following commands useful, the former one to bring down the cluster, while
-the latter one could start it again.
+3. You can also customize your own settings in `/etc/default/{component_name}` and restart it via
+`$ sudo service {component_name} restart`.
 
-    ```console
-    $ KUBERNETES_PROVIDER=ubuntu ./kube-down.sh
-    $ KUBERNETES_PROVIDER=ubuntu ./kube-up.sh
-    ```
 
-4. You can also customize your own settings in `/etc/default/{component_name}`.
+## Upgrading a Cluster
+
+If you already have a kubernetes cluster, and want to upgrade to a new version,
+you can use following command in `cluster/` directory to update the whole cluster
+or a specified node to a new version.
+
+```console
+$ KUBERNETES_PROVIDER=ubuntu ./kube-push.sh [-m|-n <node id>] <version>
+```
+
+It can be done for all components (by default), master(`-m`) or specified node(`-n`).
+Upgrading a single node is currently experimental.
+If the version is not specified, the script will try to use local binaries. You should ensure all
+the binaries are well prepared in the expected directory path cluster/ubuntu/binaries.
+
+```console
+$ tree cluster/ubuntu/binaries
+binaries/
+├── kubectl
+├── master
+│   ├── etcd
+│   ├── etcdctl
+│   ├── flanneld
+│   ├── kube-apiserver
+│   ├── kube-controller-manager
+│   └── kube-scheduler
+└── minion
+    ├── flanneld
+    ├── kubelet
+    └── kube-proxy
+```
+
+You can use following command to get a help.
+
+```console
+$ KUBERNETES_PROVIDER=ubuntu ./kube-push.sh -h
+```
+
+Here are some examples:
+
+* upgrade master to version 1.0.5: `$ KUBERNETES_PROVIDER=ubuntu ./kube-push.sh -m 1.0.5`
+* upgrade node 10.10.103.223 to version 1.0.5 : `$ KUBERNETES_PROVIDER=ubuntu ./kube-push.sh -n 10.10.103.223 1.0.5`
+* upgrade master and all nodes to version 1.0.5: `$ KUBERNETES_PROVIDER=ubuntu ./kube-push.sh 1.0.5`
+
+The script will not delete any resources of your cluster, it just replaces the binaries.
+
+### Test it out
+
+You can use the `kubectl` command to check if the newly upgraded kubernetes cluster is working correctly. See
+also [test-it-out](ubuntu.md#test-it-out)
+
+To make sure the version of the upgraded cluster is what you expect, you will find these commands helpful.
+* upgrade all components or master: `$ kubectl version`. Check the *Server Version*.
+* upgrade node 10.10.102.223: `$ ssh -t vcap@10.10.102.223 'cd /opt/bin && sudo ./kubelet --version'`
 
 
 <!-- BEGIN MUNGE: GENERATED_ANALYTICS -->

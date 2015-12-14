@@ -1,13 +1,17 @@
 .PHONY:	build push
 
+TAG = 2.0
+
+ARCH = amd64
 IMAGE = pause
-TAG = 0.8.0
+# ARCH = arm
+# IMAGE = pause-arm
 
 build:
-	./prepare.sh
+	./prepare.sh ${ARCH}
 	docker build -t gcr.io/google_containers/$(IMAGE):$(TAG) .
 
 push:	build
-	gcloud docker push gcr.io/google_containers/$(IMAGE):$(TAG)
+	gcloud docker --server=gcr.io push gcr.io/google_containers/$(IMAGE):$(TAG)
 
 all:	push

@@ -17,14 +17,28 @@ limitations under the License.
 package api
 
 import (
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/runtime"
 )
 
 // Scheme is the default instance of runtime.Scheme to which types in the Kubernetes API are already registered.
 var Scheme = runtime.NewScheme()
 
+// SchemeGroupVersion is group version used to register these objects
+var SchemeGroupVersion = unversioned.GroupVersion{Group: "", Version: ""}
+
+// Kind takes an unqualified kind and returns back a Group qualified GroupKind
+func Kind(kind string) unversioned.GroupKind {
+	return SchemeGroupVersion.WithKind(kind).GroupKind()
+}
+
+// Resource takes an unqualified resource and returns back a Group qualified GroupResource
+func Resource(resource string) unversioned.GroupResource {
+	return SchemeGroupVersion.WithResource(resource).GroupResource()
+}
+
 func init() {
-	Scheme.AddKnownTypes("",
+	Scheme.AddKnownTypes(SchemeGroupVersion,
 		&Pod{},
 		&PodList{},
 		&PodStatusResult{},
@@ -36,7 +50,6 @@ func init() {
 		&Service{},
 		&NodeList{},
 		&Node{},
-		&Status{},
 		&Endpoints{},
 		&EndpointsList{},
 		&Binding{},
@@ -67,13 +80,15 @@ func init() {
 		&ComponentStatusList{},
 		&SerializedReference{},
 		&RangeAllocation{},
-		&ThirdPartyResource{},
-		&ThirdPartyResourceList{},
-		&ThirdPartyResourceData{},
 	)
-	// Legacy names are supported
-	Scheme.AddKnownTypeWithName("", "Minion", &Node{})
-	Scheme.AddKnownTypeWithName("", "MinionList", &NodeList{})
+
+	// Register Unversioned types
+	// TODO this should not be done here
+	Scheme.AddKnownTypes(SchemeGroupVersion, &unversioned.Status{})
+	Scheme.AddKnownTypes(SchemeGroupVersion, &unversioned.APIVersions{})
+	Scheme.AddKnownTypes(SchemeGroupVersion, &unversioned.APIGroupList{})
+	Scheme.AddKnownTypes(SchemeGroupVersion, &unversioned.APIGroup{})
+	Scheme.AddKnownTypes(SchemeGroupVersion, &unversioned.APIResourceList{})
 }
 
 func (*Pod) IsAnAPIObject()                       {}
@@ -90,7 +105,6 @@ func (*EndpointsList) IsAnAPIObject()             {}
 func (*Node) IsAnAPIObject()                      {}
 func (*NodeList) IsAnAPIObject()                  {}
 func (*Binding) IsAnAPIObject()                   {}
-func (*Status) IsAnAPIObject()                    {}
 func (*Event) IsAnAPIObject()                     {}
 func (*EventList) IsAnAPIObject()                 {}
 func (*List) IsAnAPIObject()                      {}
@@ -118,6 +132,3 @@ func (*ComponentStatus) IsAnAPIObject()           {}
 func (*ComponentStatusList) IsAnAPIObject()       {}
 func (*SerializedReference) IsAnAPIObject()       {}
 func (*RangeAllocation) IsAnAPIObject()           {}
-func (*ThirdPartyResource) IsAnAPIObject()        {}
-func (*ThirdPartyResourceList) IsAnAPIObject()    {}
-func (*ThirdPartyResourceData) IsAnAPIObject()    {}

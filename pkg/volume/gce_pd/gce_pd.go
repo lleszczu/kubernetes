@@ -55,7 +55,8 @@ func (plugin *gcePersistentDiskPlugin) Name() string {
 }
 
 func (plugin *gcePersistentDiskPlugin) CanSupport(spec *volume.Spec) bool {
-	return spec.VolumeSource.GCEPersistentDisk != nil || spec.PersistentVolumeSource.GCEPersistentDisk != nil
+	return (spec.PersistentVolume != nil && spec.PersistentVolume.Spec.GCEPersistentDisk != nil) ||
+		(spec.Volume != nil && spec.Volume.GCEPersistentDisk != nil)
 }
 
 func (plugin *gcePersistentDiskPlugin) GetAccessModes() []api.PersistentVolumeAccessMode {
@@ -65,9 +66,9 @@ func (plugin *gcePersistentDiskPlugin) GetAccessModes() []api.PersistentVolumeAc
 	}
 }
 
-func (plugin *gcePersistentDiskPlugin) NewBuilder(spec *volume.Spec, pod *api.Pod, _ volume.VolumeOptions, mounter mount.Interface) (volume.Builder, error) {
+func (plugin *gcePersistentDiskPlugin) NewBuilder(spec *volume.Spec, pod *api.Pod, _ volume.VolumeOptions) (volume.Builder, error) {
 	// Inject real implementations here, test through the internal function.
-	return plugin.newBuilderInternal(spec, pod.UID, &GCEDiskUtil{}, mounter)
+	return plugin.newBuilderInternal(spec, pod.UID, &GCEDiskUtil{}, plugin.host.GetMounter())
 }
 
 func (plugin *gcePersistentDiskPlugin) newBuilderInternal(spec *volume.Spec, podUID types.UID, manager pdManager, mounter mount.Interface) (volume.Builder, error) {
@@ -76,11 +77,11 @@ func (plugin *gcePersistentDiskPlugin) newBuilderInternal(spec *volume.Spec, pod
 	var readOnly bool
 
 	var gce *api.GCEPersistentDiskVolumeSource
-	if spec.VolumeSource.GCEPersistentDisk != nil {
-		gce = spec.VolumeSource.GCEPersistentDisk
+	if spec.Volume != nil && spec.Volume.GCEPersistentDisk != nil {
+		gce = spec.Volume.GCEPersistentDisk
 		readOnly = gce.ReadOnly
 	} else {
-		gce = spec.PersistentVolumeSource.GCEPersistentDisk
+		gce = spec.PersistentVolume.Spec.GCEPersistentDisk
 		readOnly = spec.ReadOnly
 	}
 
@@ -94,7 +95,7 @@ func (plugin *gcePersistentDiskPlugin) newBuilderInternal(spec *volume.Spec, pod
 	return &gcePersistentDiskBuilder{
 		gcePersistentDisk: &gcePersistentDisk{
 			podUID:    podUID,
-			volName:   spec.Name,
+			volName:   spec.Name(),
 			pdName:    pdName,
 			partition: partition,
 			mounter:   mounter,
@@ -106,9 +107,9 @@ func (plugin *gcePersistentDiskPlugin) newBuilderInternal(spec *volume.Spec, pod
 		diskMounter: &mount.SafeFormatAndMount{mounter, exec.New()}}, nil
 }
 
-func (plugin *gcePersistentDiskPlugin) NewCleaner(volName string, podUID types.UID, mounter mount.Interface) (volume.Cleaner, error) {
+func (plugin *gcePersistentDiskPlugin) NewCleaner(volName string, podUID types.UID) (volume.Cleaner, error) {
 	// Inject real implementations here, test through the internal function.
-	return plugin.newCleanerInternal(volName, podUID, &GCEDiskUtil{}, mounter)
+	return plugin.newCleanerInternal(volName, podUID, &GCEDiskUtil{}, plugin.host.GetMounter())
 }
 
 func (plugin *gcePersistentDiskPlugin) newCleanerInternal(volName string, podUID types.UID, manager pdManager, mounter mount.Interface) (volume.Cleaner, error) {
@@ -143,6 +144,7 @@ type gcePersistentDisk struct {
 	// Mounter interface that provides system calls to mount the global path to the pod local path.
 	mounter mount.Interface
 	plugin  *gcePersistentDiskPlugin
+	volume.MetricsNil
 }
 
 func detachDiskLogError(pd *gcePersistentDisk) {
@@ -159,10 +161,19 @@ type gcePersistentDiskBuilder struct {
 	// Specifies whether the disk will be attached as read-only.
 	readOnly bool
 	// diskMounter provides the interface that is used to mount the actual block device.
-	diskMounter mount.Interface
+	diskMounter *mount.SafeFormatAndMount
 }
 
 var _ volume.Builder = &gcePersistentDiskBuilder{}
+
+func (b *gcePersistentDiskBuilder) GetAttributes() volume.Attributes {
+	return volume.Attributes{
+		ReadOnly:                    b.readOnly,
+		Managed:                     !b.readOnly,
+		SupportsOwnershipManagement: true,
+		SupportsSELinux:             true,
+	}
+}
 
 // SetUp attaches the disk and bind mounts to the volume path.
 func (b *gcePersistentDiskBuilder) SetUp() error {
@@ -227,10 +238,6 @@ func (b *gcePersistentDiskBuilder) SetUpAt(dir string) error {
 	}
 
 	return nil
-}
-
-func (b *gcePersistentDiskBuilder) IsReadOnly() bool {
-	return b.readOnly
 }
 
 func makeGlobalPDName(host volume.VolumeHost, devName string) string {

@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/proposals/apiserver-watch.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/proposals/apiserver-watch.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -116,7 +116,7 @@ we will store two things:
   This should be as simple as having an array an treating it as a cyclic buffer.
   Obviously resourceVersion of objects watched from etcd will be increasing, but
   they are necessary for registering a new watcher that is interested in all the
-  changes since a given etcdIndec.
+  changes since a given etcdIndex.
 
   Additionally, we should support LIST operation, otherwise clients can never
   start watching at now. We may consider passing lists through etcd, however
@@ -166,7 +166,7 @@ the same time, we can introduce an additional etcd event type:
   Thus, we need to create the EtcdResync event, extend watch.Interface and
   its implementations to support it and handle those events appropriately
   in places like
-  [Reflector](../../pkg/client/unversioned/cache/reflector.go)
+  [Reflector](../../pkg/client/cache/reflector.go)
 
 	However, this might turn out to be unnecessary optimization if apiserver
 	will always keep up (which is possible in the new design). We will work

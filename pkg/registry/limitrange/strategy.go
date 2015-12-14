@@ -17,6 +17,8 @@ limitations under the License.
 package limitrange
 
 import (
+	"fmt"
+
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/validation"
 	"k8s.io/kubernetes/pkg/fields"
@@ -24,7 +26,7 @@ import (
 	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util"
-	"k8s.io/kubernetes/pkg/util/fielderrors"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 type limitrangeStrategy struct {
@@ -50,16 +52,20 @@ func (limitrangeStrategy) PrepareForCreate(obj runtime.Object) {
 func (limitrangeStrategy) PrepareForUpdate(obj, old runtime.Object) {
 }
 
-func (limitrangeStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.ValidationErrorList {
+func (limitrangeStrategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
 	limitRange := obj.(*api.LimitRange)
 	return validation.ValidateLimitRange(limitRange)
+}
+
+// Canonicalize normalizes the object after validation.
+func (limitrangeStrategy) Canonicalize(obj runtime.Object) {
 }
 
 func (limitrangeStrategy) AllowCreateOnUpdate() bool {
 	return true
 }
 
-func (limitrangeStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (limitrangeStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
 	limitRange := obj.(*api.LimitRange)
 	return validation.ValidateLimitRange(limitRange)
 }
@@ -68,10 +74,20 @@ func (limitrangeStrategy) AllowUnconditionalUpdate() bool {
 	return true
 }
 
-func MatchLimitRange(label labels.Selector, field fields.Selector) generic.Matcher {
-	return &generic.SelectionPredicate{Label: label, Field: field, GetAttrs: getAttrs}
+func LimitRangeToSelectableFields(limitRange *api.LimitRange) fields.Set {
+	return fields.Set{}
 }
 
-func getAttrs(obj runtime.Object) (objLabels labels.Set, objFields fields.Set, err error) {
-	return labels.Set{}, fields.Set{}, nil
+func MatchLimitRange(label labels.Selector, field fields.Selector) generic.Matcher {
+	return &generic.SelectionPredicate{
+		Label: label,
+		Field: field,
+		GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
+			lr, ok := obj.(*api.LimitRange)
+			if !ok {
+				return nil, nil, fmt.Errorf("given object is not a limit range.")
+			}
+			return labels.Set(lr.ObjectMeta.Labels), LimitRangeToSelectableFields(lr), nil
+		},
+	}
 }

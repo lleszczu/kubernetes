@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/devel/making-release-notes.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/devel/making-release-notes.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -66,7 +66,7 @@ With the final markdown all set, cut and paste it to the top of `CHANGELOG.md`
 
 ### 5) Update the Release page
 
-   * Switch to the [releases](https://github.com/GoogleCloudPlatform/kubernetes/releases) page.
+   * Switch to the [releases](https://github.com/kubernetes/kubernetes/releases) page.
    * Open up the release you are working on.
    * Cut and paste the final markdown from above into the release notes
    * Press Save.

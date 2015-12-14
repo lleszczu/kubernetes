@@ -32,11 +32,11 @@ function ensure-basic-networking() {
     echo 'Waiting for functional DNS (trying to resolve metadata.google.internal)...'
     sleep 3
   done
-  until getent hosts $(hostname -f) &>/dev/null; do
+  until getent hosts $(hostname -f || echo _error_) &>/dev/null; do
     echo 'Waiting for functional DNS (trying to resolve my own FQDN)...'
     sleep 3
   done
-  until getent hosts $(hostname -i) &>/dev/null; do
+  until getent hosts $(hostname -i || echo _error_) &>/dev/null; do
     echo 'Waiting for functional DNS (trying to resolve my own IP)...'
     sleep 3
   done
@@ -65,7 +65,7 @@ function set-good-motd() {
 }
 
 function curl-metadata() {
-  curl --fail --silent -H 'Metadata-Flavor: Google' "http://metadata/computeMetadata/v1/instance/attributes/${1}"
+  curl --fail --retry 5 --silent -H 'Metadata-Flavor: Google' "http://metadata/computeMetadata/v1/instance/attributes/${1}"
 }
 
 function set-kube-env() {
@@ -77,12 +77,13 @@ function set-kube-env() {
   done
 
   # kube-env has all the environment variables we care about, in a flat yaml format
-  eval $(python -c '''
+  eval "$(python -c '
 import pipes,sys,yaml
 
 for k,v in yaml.load(sys.stdin).iteritems():
-  print "readonly {var}={value}".format(var = k, value = pipes.quote(str(v)))
-''' < "${kube_env_yaml}")
+  print """readonly {var}={value}""".format(var = k, value = pipes.quote(str(v)))
+  print """export {var}""".format(var = k)
+  ' < """${kube_env_yaml}""")"
 }
 
 function remove-docker-artifacts() {
@@ -268,6 +269,7 @@ service_cluster_ip_range: '$(echo "$SERVICE_CLUSTER_IP_RANGE" | sed -e "s/'/''/g
 enable_cluster_monitoring: '$(echo "$ENABLE_CLUSTER_MONITORING" | sed -e "s/'/''/g")'
 enable_cluster_logging: '$(echo "$ENABLE_CLUSTER_LOGGING" | sed -e "s/'/''/g")'
 enable_cluster_ui: '$(echo "$ENABLE_CLUSTER_UI" | sed -e "s/'/''/g")'
+enable_l7_loadbalancing: '$(echo "$ENABLE_L7_LOADBALANCING" | sed -e "s/'/''/g")'
 enable_node_logging: '$(echo "$ENABLE_NODE_LOGGING" | sed -e "s/'/''/g")'
 logging_destination: '$(echo "$LOGGING_DESTINATION" | sed -e "s/'/''/g")'
 elasticsearch_replicas: '$(echo "$ELASTICSEARCH_LOGGING_REPLICAS" | sed -e "s/'/''/g")'
@@ -277,8 +279,21 @@ dns_replicas: '$(echo "$DNS_REPLICAS" | sed -e "s/'/''/g")'
 dns_server: '$(echo "$DNS_SERVER_IP" | sed -e "s/'/''/g")'
 dns_domain: '$(echo "$DNS_DOMAIN" | sed -e "s/'/''/g")'
 admission_control: '$(echo "$ADMISSION_CONTROL" | sed -e "s/'/''/g")'
+network_provider: '$(echo "$NETWORK_PROVIDER")'
+opencontrail_tag: '$(echo "$OPENCONTRAIL_TAG")'
+opencontrail_kubernetes_tag: '$(echo "$OPENCONTRAIL_KUBERNETES_TAG")'
+opencontrail_public_subnet: '$(echo "$OPENCONTRAIL_PUBLIC_SUBNET")'
+enable_manifest_url: '$(echo "$ENABLE_MANIFEST_URL" | sed -e "s/'/''/g")'
+manifest_url: '$(echo "$MANIFEST_URL" | sed -e "s/'/''/g")'
+manifest_url_header: '$(echo "$MANIFEST_URL_HEADER" | sed -e "s/'/''/g")'
+num_nodes: $(echo "${NUM_NODES}")
+e2e_storage_test_environment: '$(echo "$E2E_STORAGE_TEST_ENVIRONMENT" | sed -e "s/'/''/g")'
 EOF
-
+    if [ -n "${KUBELET_PORT:-}" ]; then
+      cat <<EOF >>/srv/salt-overlay/pillar/cluster-params.sls
+kubelet_port: '$(echo "$KUBELET_PORT" | sed -e "s/'/''/g")'
+EOF
+    fi
     if [ -n "${APISERVER_TEST_ARGS:-}" ]; then
       cat <<EOF >>/srv/salt-overlay/pillar/cluster-params.sls
 apiserver_test_args: '$(echo "$APISERVER_TEST_ARGS" | sed -e "s/'/''/g")'
@@ -310,6 +325,11 @@ EOF
 cluster_registry_disk_type: gce
 cluster_registry_disk_size: $(convert-bytes-gce-kube ${CLUSTER_REGISTRY_DISK_SIZE})
 cluster_registry_disk_name: ${CLUSTER_REGISTRY_DISK}
+EOF
+    fi
+    if [ -n "${TERMINATED_POD_GC_THRESHOLD:-}" ]; then
+      cat <<EOF >>/srv/salt-overlay/pillar/cluster-params.sls
+terminated_pod_gc_threshold: '$(echo "${TERMINATED_POD_GC_THRESHOLD}" | sed -e "s/'/''/g")'
 EOF
     fi
 }
@@ -509,7 +529,7 @@ function download-release() {
   done
 
   echo "Running release install script"
-  sudo kubernetes/saltbase/install.sh "${SERVER_BINARY_TAR_URL##*/}"
+  kubernetes/saltbase/install.sh "${SERVER_BINARY_TAR_URL##*/}"
 }
 
 function fix-apt-sources() {
@@ -540,10 +560,11 @@ grains:
     - kubernetes-master
   cloud: gce
 EOF
-  if ! [[ -z "${PROJECT_ID:-}" ]] && ! [[ -z "${TOKEN_URL:-}" ]] && ! [[ -z "${NODE_NETWORK:-}" ]] ; then
+  if ! [[ -z "${PROJECT_ID:-}" ]] && ! [[ -z "${TOKEN_URL:-}" ]] && ! [[ -z "${TOKEN_BODY:-}" ]] && ! [[ -z "${NODE_NETWORK:-}" ]] ; then
     cat <<EOF >/etc/gce.conf
 [global]
 token-url = ${TOKEN_URL}
+token-body = ${TOKEN_BODY}
 project-id = ${PROJECT_ID}
 network-name = ${NODE_NETWORK}
 EOF
@@ -567,6 +588,11 @@ EOF
     # CIDR range.
     cat <<EOF >>/etc/salt/minion.d/grains.conf
   cbr-cidr: ${MASTER_IP_RANGE}
+EOF
+  fi
+  if [[ ! -z "${RUNTIME_CONFIG:-}" ]]; then
+    cat <<EOF >>/etc/salt/minion.d/grains.conf
+  runtime_config: '$(echo "$RUNTIME_CONFIG" | sed -e "s/'/''/g")'
 EOF
   fi
 }
@@ -640,6 +666,15 @@ if [[ -z "${is_push}" ]]; then
   remove-docker-artifacts
   run-salt
   set-good-motd
+
+  if curl-metadata k8s-user-startup-script > "${INSTALL_DIR}/k8s-user-script.sh"; then
+    user_script=$(cat "${INSTALL_DIR}/k8s-user-script.sh")
+  fi
+  if [[ ! -z ${user_script:-} ]]; then
+    chmod u+x "${INSTALL_DIR}/k8s-user-script.sh"
+    echo "== running user startup script =="
+    "${INSTALL_DIR}/k8s-user-script.sh"
+  fi
   echo "== kube-up node config done =="
 else
   echo "== kube-push node config starting =="

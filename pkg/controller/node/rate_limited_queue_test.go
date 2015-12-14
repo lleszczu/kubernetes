@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package nodecontroller
+package node
 
 import (
 	"reflect"
@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/sets"
 )
 
 func CheckQueueEq(lhs []string, rhs TimedQueue) bool {
@@ -33,12 +34,12 @@ func CheckQueueEq(lhs []string, rhs TimedQueue) bool {
 	return true
 }
 
-func CheckSetEq(lhs, rhs util.StringSet) bool {
+func CheckSetEq(lhs, rhs sets.String) bool {
 	return lhs.HasAll(rhs.List()...) && rhs.HasAll(lhs.List()...)
 }
 
 func TestAddNode(t *testing.T) {
-	evictor := NewRateLimitedTimedQueue(util.NewFakeRateLimiter(), true)
+	evictor := NewRateLimitedTimedQueue(util.NewFakeRateLimiter())
 	evictor.Add("first")
 	evictor.Add("second")
 	evictor.Add("third")
@@ -51,7 +52,7 @@ func TestAddNode(t *testing.T) {
 		t.Errorf("Invalid queue. Got %v, expected %v", evictor.queue.queue, queuePattern)
 	}
 
-	setPattern := util.NewStringSet("first", "second", "third")
+	setPattern := sets.NewString("first", "second", "third")
 	if len(evictor.queue.set) != len(setPattern) {
 		t.Fatalf("Map %v should have length %d", evictor.queue.set, len(setPattern))
 	}
@@ -61,7 +62,7 @@ func TestAddNode(t *testing.T) {
 }
 
 func TestDelNode(t *testing.T) {
-	evictor := NewRateLimitedTimedQueue(util.NewFakeRateLimiter(), true)
+	evictor := NewRateLimitedTimedQueue(util.NewFakeRateLimiter())
 	evictor.Add("first")
 	evictor.Add("second")
 	evictor.Add("third")
@@ -75,7 +76,7 @@ func TestDelNode(t *testing.T) {
 		t.Errorf("Invalid queue. Got %v, expected %v", evictor.queue.queue, queuePattern)
 	}
 
-	setPattern := util.NewStringSet("second", "third")
+	setPattern := sets.NewString("second", "third")
 	if len(evictor.queue.set) != len(setPattern) {
 		t.Fatalf("Map %v should have length %d", evictor.queue.set, len(setPattern))
 	}
@@ -83,7 +84,7 @@ func TestDelNode(t *testing.T) {
 		t.Errorf("Invalid map. Got %v, expected %v", evictor.queue.set, setPattern)
 	}
 
-	evictor = NewRateLimitedTimedQueue(util.NewFakeRateLimiter(), true)
+	evictor = NewRateLimitedTimedQueue(util.NewFakeRateLimiter())
 	evictor.Add("first")
 	evictor.Add("second")
 	evictor.Add("third")
@@ -97,7 +98,7 @@ func TestDelNode(t *testing.T) {
 		t.Errorf("Invalid queue. Got %v, expected %v", evictor.queue.queue, queuePattern)
 	}
 
-	setPattern = util.NewStringSet("first", "third")
+	setPattern = sets.NewString("first", "third")
 	if len(evictor.queue.set) != len(setPattern) {
 		t.Fatalf("Map %v should have length %d", evictor.queue.set, len(setPattern))
 	}
@@ -105,7 +106,7 @@ func TestDelNode(t *testing.T) {
 		t.Errorf("Invalid map. Got %v, expected %v", evictor.queue.set, setPattern)
 	}
 
-	evictor = NewRateLimitedTimedQueue(util.NewFakeRateLimiter(), true)
+	evictor = NewRateLimitedTimedQueue(util.NewFakeRateLimiter())
 	evictor.Add("first")
 	evictor.Add("second")
 	evictor.Add("third")
@@ -119,7 +120,7 @@ func TestDelNode(t *testing.T) {
 		t.Errorf("Invalid queue. Got %v, expected %v", evictor.queue.queue, queuePattern)
 	}
 
-	setPattern = util.NewStringSet("first", "second")
+	setPattern = sets.NewString("first", "second")
 	if len(evictor.queue.set) != len(setPattern) {
 		t.Fatalf("Map %v should have length %d", evictor.queue.set, len(setPattern))
 	}
@@ -129,19 +130,19 @@ func TestDelNode(t *testing.T) {
 }
 
 func TestTry(t *testing.T) {
-	evictor := NewRateLimitedTimedQueue(util.NewFakeRateLimiter(), true)
+	evictor := NewRateLimitedTimedQueue(util.NewFakeRateLimiter())
 	evictor.Add("first")
 	evictor.Add("second")
 	evictor.Add("third")
 	evictor.Remove("second")
 
-	deletedMap := util.NewStringSet()
+	deletedMap := sets.NewString()
 	evictor.Try(func(value TimedValue) (bool, time.Duration) {
 		deletedMap.Insert(value.Value)
 		return true, 0
 	})
 
-	setPattern := util.NewStringSet("first", "third")
+	setPattern := sets.NewString("first", "third")
 	if len(deletedMap) != len(setPattern) {
 		t.Fatalf("Map %v should have length %d", evictor.queue.set, len(setPattern))
 	}
@@ -151,7 +152,7 @@ func TestTry(t *testing.T) {
 }
 
 func TestTryOrdering(t *testing.T) {
-	evictor := NewRateLimitedTimedQueue(util.NewFakeRateLimiter(), false)
+	evictor := NewRateLimitedTimedQueue(util.NewFakeRateLimiter())
 	evictor.Add("first")
 	evictor.Add("second")
 	evictor.Add("third")
@@ -174,16 +175,16 @@ func TestTryOrdering(t *testing.T) {
 		order = append(order, value.Value)
 		return true, 0
 	})
-	if !reflect.DeepEqual(order, []string{"first", "third", "second"}) {
+	if !reflect.DeepEqual(order, []string{"first", "third"}) {
 		t.Fatalf("order was wrong: %v", order)
 	}
-	if count != 4 {
+	if count != 3 {
 		t.Fatalf("unexpected iterations: %d", count)
 	}
 }
 
 func TestTryRemovingWhileTry(t *testing.T) {
-	evictor := NewRateLimitedTimedQueue(util.NewFakeRateLimiter(), false)
+	evictor := NewRateLimitedTimedQueue(util.NewFakeRateLimiter())
 	evictor.Add("first")
 	evictor.Add("second")
 	evictor.Add("third")

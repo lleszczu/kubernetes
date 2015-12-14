@@ -17,13 +17,13 @@ Calling 'vagrant up' directly is not supported.  Instead, please run the followi
 END
 end
 
-# The number of minions to provision
-$num_minion = (ENV['NUM_MINIONS'] || 1).to_i
+# The number of nodes to provision
+$num_node = (ENV['NUM_NODES'] || 1).to_i
 
 # ip configuration
 $master_ip = ENV['MASTER_IP']
-$minion_ip_base = ENV['MINION_IP_BASE'] || ""
-$minion_ips = $num_minion.times.collect { |n| $minion_ip_base + "#{n+3}" }
+$node_ip_base = ENV['NODE_IP_BASE'] || ""
+$node_ips = $num_node.times.collect { |n| $node_ip_base + "#{n+3}" }
 
 # Determine the OS platform to use
 $kube_os = ENV['KUBERNETES_OS'] || "fedora"
@@ -68,14 +68,14 @@ $kube_provider_boxes = {
   },
   :libvirt => {
     'fedora' => {
-      :box_name => 'kube-fedora20',
-      :box_url => 'http://citozin.com/opscode_fedora-20_chef-provisionerless_libvirt.box'
+      :box_name => 'kube-fedora21',
+      :box_url => 'https://amadeus.box.com/shared/static/93mj2fajrii6afeh8b5v5ihuk2ows2yn.box'
     }
   },
   :vmware_desktop => {
     'fedora' => {
-      :box_name => 'kube-fedora20',
-      :box_url => 'http://opscode-vm-bento.s3.amazonaws.com/vagrant/vmware/opscode_fedora-20-i386_chef-provisionerless.box'
+      :box_name => 'kube-fedora21',
+      :box_url => 'http://opscode-vm-bento.s3.amazonaws.com/vagrant/vmware/opscode_fedora-21_chef-provisionerless.box'
     }
   }
 }
@@ -104,8 +104,8 @@ end
 # In Fedora VM, tmpfs device is mapped to /tmp.  tmpfs is given 50% of RAM allocation.
 # When doing Salt provisioning, we copy approximately 200MB of content in /tmp before anything else happens.
 # This causes problems if anything else was in /tmp or the other directories that are bound to tmpfs device (i.e /run, etc.)
-$vm_master_mem = (ENV['KUBERNETES_MASTER_MEMORY'] || ENV['KUBERNETES_MEMORY'] || 1024).to_i
-$vm_minion_mem = (ENV['KUBERNETES_MINION_MEMORY'] || ENV['KUBERNETES_MEMORY'] || 1024).to_i
+$vm_master_mem = (ENV['KUBERNETES_MASTER_MEMORY'] || ENV['KUBERNETES_MEMORY'] || 1280).to_i
+$vm_node_mem = (ENV['KUBERNETES_NODE_MEMORY'] || ENV['KUBERNETES_MEMORY'] || 1024).to_i
 
 Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   def setvmboxandurl(config, provider)
@@ -221,21 +221,21 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     c.vm.network "private_network", ip: "#{$master_ip}"
   end
 
-  # Kubernetes minion
-  $num_minion.times do |n|
-    minion_vm_name = "minion-#{n+1}"
-    minion_prefix = ENV['INSTANCE_PREFIX'] || 'kubernetes' # must mirror default in cluster/vagrant/config-default.sh
-    minion_hostname = "#{minion_prefix}-#{minion_vm_name}"
+  # Kubernetes node
+  $num_node.times do |n|
+    node_vm_name = "node-#{n+1}"
+    node_prefix = ENV['INSTANCE_PREFIX'] || 'kubernetes' # must mirror default in cluster/vagrant/config-default.sh
+    node_hostname = "#{node_prefix}-#{node_vm_name}"
 
-    config.vm.define minion_vm_name do |minion|
-      customize_vm minion, $vm_minion_mem
+    config.vm.define node_vm_name do |node|
+      customize_vm node, $vm_node_mem
 
-      minion_ip = $minion_ips[n]
+      node_ip = $node_ips[n]
       if ENV['KUBE_TEMP'] then
-        script = "#{ENV['KUBE_TEMP']}/minion-start-#{n}.sh"
-        minion.vm.provision "shell", run: "always", path: script
+        script = "#{ENV['KUBE_TEMP']}/node-start-#{n}.sh"
+        node.vm.provision "shell", run: "always", path: script
       end
-      minion.vm.network "private_network", ip: "#{minion_ip}"
+      node.vm.network "private_network", ip: "#{node_ip}"
     end
   end
 end

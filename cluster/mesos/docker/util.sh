@@ -98,8 +98,6 @@ function cluster::mesos::docker::run_in_docker_test {
       ${kube_config_mount} \
       -v "/var/run/docker.sock:/var/run/docker.sock" \
       --link docker_mesosmaster1_1:mesosmaster1 \
-      --link docker_mesosslave1_1:mesosslave1 \
-      --link docker_mesosslave2_1:mesosslave2 \
       --link docker_apiserver_1:apiserver \
       --entrypoint="${entrypoint}" \
       mesosphere/kubernetes-mesos-test \
@@ -206,10 +204,10 @@ function detect-master {
   echo "KUBE_MASTER_IP: $KUBE_MASTER_IP" 1>&2
 }
 
-# Get minion IP addresses and store in KUBE_MINION_IP_ADDRESSES[]
+# Get minion IP addresses and store in KUBE_NODE_IP_ADDRESSES[]
 # These Mesos slaves MAY host Kublets,
 # but might not have a Kublet running unless a kubernetes task has been scheduled on them.
-function detect-minions {
+function detect-nodes {
   local docker_ids=$(docker ps --filter="name=docker_mesosslave" --quiet)
   if [ -z "${docker_ids}" ]; then
     echo "ERROR: Mesos slave(s) not running" 1>&2
@@ -217,9 +215,9 @@ function detect-minions {
   fi
   while read -r docker_id; do
     local minion_ip=$(docker inspect --format="{{.NetworkSettings.IPAddress}}" "${docker_id}")
-    KUBE_MINION_IP_ADDRESSES+=("${minion_ip}")
+    KUBE_NODE_IP_ADDRESSES+=("${minion_ip}")
   done <<< "$docker_ids"
-  echo "KUBE_MINION_IP_ADDRESSES: [${KUBE_MINION_IP_ADDRESSES[*]}]" 1>&2
+  echo "KUBE_NODE_IP_ADDRESSES: [${KUBE_NODE_IP_ADDRESSES[*]}]" 1>&2
 }
 
 # Verify prereqs on host machine
@@ -255,16 +253,13 @@ function cluster::mesos::docker::init_auth {
 # Instantiate a kubernetes cluster.
 function kube-up {
   # Nuke old mesos-slave workspaces
-  for ((i=1; i <= NUM_MINIONS; i++)) do
-    local work_dir="${MESOS_DOCKER_WORK_DIR}/mesosslave${i}/mesos"
-    echo "Creating Mesos Work Dir: ${work_dir}" 1>&2
-    mkdir -p "${work_dir}"
-    rm -rf "${work_dir}"/*
-  done
-
-  local -r log_dir="${MESOS_DOCKER_WORK_DIR}/log"
+  local work_dir="${MESOS_DOCKER_WORK_DIR}/mesosslave"
+  echo "Creating Mesos Work Dir: ${work_dir}" 1>&2
+  mkdir -p "${work_dir}"
+  rm -rf "${work_dir}"/*
 
   # Nuke old logs
+  local -r log_dir="${MESOS_DOCKER_WORK_DIR}/log"
   mkdir -p "${log_dir}"
   rm -rf "${log_dir}"/*
 
@@ -272,7 +267,7 @@ function kube-up {
   echo "Pulling Docker images" 1>&2
   cluster::mesos::docker::docker_compose_lazy_pull
 
-  if [ "${MESOS_DOCKER_SKIP_BUILD:-false}" != "true" ]; then
+  if [ "${MESOS_DOCKER_SKIP_BUILD}" != "true" ]; then
     echo "Building Docker images" 1>&2
     # TODO: version images (k8s version, git sha, and dirty state) to avoid re-building them every time.
     "${provider_root}/km/build.sh"
@@ -288,13 +283,15 @@ function kube-up {
 
   echo "Starting ${KUBERNETES_PROVIDER} cluster" 1>&2
   cluster::mesos::docker::docker_compose up -d
+  echo "Scaling ${KUBERNETES_PROVIDER} cluster to ${NUM_NODES} slaves"
+  cluster::mesos::docker::docker_compose scale mesosslave=${NUM_NODES}
 
   # await-health-check requires GNU timeout
   # apiserver hostname resolved by docker
   cluster::mesos::docker::run_in_docker_test await-health-check "-t=${MESOS_DOCKER_API_TIMEOUT}" http://apiserver:8888/healthz
 
   detect-master
-  detect-minions
+  detect-nodes
   create-kubeconfig
 
   echo "Deploying Addons" 1>&2
@@ -320,6 +317,9 @@ function validate-cluster {
 
 # Delete a kubernetes cluster
 function kube-down {
+  if [ "${MESOS_DOCKER_DUMP_LOGS}" == "true" ]; then
+    cluster::mesos::docker::dump_logs "${MESOS_DOCKER_WORK_DIR}/log"
+  fi
   echo "Stopping ${KUBERNETES_PROVIDER} cluster" 1>&2
   # Since restoring a stopped cluster is not yet supported, use the nuclear option
   cluster::mesos::docker::docker_compose kill

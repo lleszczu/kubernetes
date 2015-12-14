@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/admin/service-accounts-admin.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/admin/service-accounts-admin.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -46,7 +46,7 @@ for a number of reasons:
   - User accounts are for humans.  Service accounts are for processes, which
     run in pods.
   - User accounts are intended to be global. Names must be unique across all
-    namespaces of a cluster, future user resource will not be namespaced).
+    namespaces of a cluster, future user resource will not be namespaced.
     Service accounts are namespaced.
   - Typically, a cluster's User accounts might be synced from a corporate
     database, where new user account creation requires special privileges and

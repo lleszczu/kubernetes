@@ -2,19 +2,40 @@ apiVersion: v1
 kind: ReplicationController
 metadata:
   name: frontend
+  # these labels can be applied automatically
+  # from the labels in the pod template if not set
   labels:
-    name: frontend
+    app: guestbook
+    tier: frontend
 spec:
+  # this replicas value is default
+  # modify it according to your case
   replicas: 3
-  selector:
-    name: frontend
+  # selector can be applied automatically
+  # from the labels in the pod template if not set
+  # selector:
+  #   app: guestbook
+  #   tier: frontend
   template:
     metadata:
       labels:
-        name: frontend
+        app: guestbook
+        tier: frontend
     spec:
       containers:
       - name: php-redis
-        image: gcr.io/google_containers/example-guestbook-php-redis:v3
+        image: gcr.io/google_samples/gb-frontend:v3
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        env:
+        - name: GET_HOSTS_FROM
+          value: dns
+          # If your cluster config does not include a dns service, then to
+          # instead access environment variables to find service host
+          # info, comment out the 'value: dns' line above, and uncomment the
+          # line below.
+          # value: env
         ports:
         - containerPort: 80

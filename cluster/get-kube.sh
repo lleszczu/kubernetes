@@ -28,8 +28,8 @@
 #   * export KUBERNETES_PROVIDER=gke; wget -q -O - https://get.k8s.io | bash
 #  Amazon EC2
 #   * export KUBERNETES_PROVIDER=aws; wget -q -O - https://get.k8s.io | bash
-#  Microsoft Azure
-#   * export KUBERNETES_PROVIDER=azure; wget -q -O - https://get.k8s.io | bash
+#  Libvirt (with CoreOS as a guest operating system)
+#   * export KUBERNETES_PROVIDER=libvirt-coreos; wget -q -O - https://get.k8s.io | bash
 #  Vagrant (local virtual machines)
 #   * export KUBERNETES_PROVIDER=vagrant; wget -q -O - https://get.k8s.io | bash
 #  VMWare VSphere
@@ -96,9 +96,11 @@ elif [[ "${machine}" == "i686" ]]; then
   arch="386"
 elif [[ "${machine}" == "arm*" ]]; then
   arch="arm"
+elif [[ "${machine}" == "s390x*" ]]; then
+  arch="s390x"
 else
   echo "Unknown, unsupported architecture (${machine})."
-  echo "Supported architectures x86_64, i686, arm*"
+  echo "Supported architectures x86_64, i686, arm, s390x."
   echo "Bailing out."
   exit 3
 fi

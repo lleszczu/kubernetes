@@ -20,12 +20,12 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -36,15 +36,27 @@ import (
 type Framework struct {
 	BaseName string
 
-	Namespace *api.Namespace
-	Client    *client.Client
+	Namespace                *api.Namespace
+	Client                   *client.Client
+	NamespaceDeletionTimeout time.Duration
+
+	gatherer containerResourceGatherer
+	// Constraints that passed to a check which is exectued after data is gathered to
+	// see if 99% of results are within acceptable bounds. It as to be injected in the test,
+	// as expectations vary greatly. Constraints are groupped by the container names.
+	addonResourceConstraints map[string]resourceConstraint
+
+	logsSizeWaitGroup    sync.WaitGroup
+	logsSizeCloseChannel chan bool
+	logsSizeVerifier     *LogsSizeVerifier
 }
 
 // NewFramework makes a new framework and sets up a BeforeEach/AfterEach for
 // you (you can write additional before/after each functions).
 func NewFramework(baseName string) *Framework {
 	f := &Framework{
-		BaseName: baseName,
+		BaseName:                 baseName,
+		addonResourceConstraints: make(map[string]resourceConstraint),
 	}
 
 	BeforeEach(f.beforeEach)
@@ -67,9 +79,28 @@ func (f *Framework) beforeEach() {
 
 	f.Namespace = namespace
 
-	By("Waiting for a default service account to be provisioned in namespace")
-	err = waitForDefaultServiceAccountInNamespace(c, namespace.Name)
-	Expect(err).NotTo(HaveOccurred())
+	if testContext.VerifyServiceAccount {
+		By("Waiting for a default service account to be provisioned in namespace")
+		err = waitForDefaultServiceAccountInNamespace(c, namespace.Name)
+		Expect(err).NotTo(HaveOccurred())
+	} else {
+		Logf("Skipping waiting for service account")
+	}
+
+	if testContext.GatherKubeSystemResourceUsageData {
+		f.gatherer.startGatheringData(c, time.Minute)
+	}
+
+	if testContext.GatherLogsSizes {
+		f.logsSizeWaitGroup = sync.WaitGroup{}
+		f.logsSizeWaitGroup.Add(1)
+		f.logsSizeCloseChannel = make(chan bool)
+		f.logsSizeVerifier = NewLogsVerifier(c, f.logsSizeCloseChannel)
+		go func() {
+			f.logsSizeVerifier.Run()
+			f.logsSizeWaitGroup.Done()
+		}()
+	}
 }
 
 // afterEach deletes the namespace, after reading its events.
@@ -77,7 +108,7 @@ func (f *Framework) afterEach() {
 	// Print events if the test failed.
 	if CurrentGinkgoTestDescription().Failed {
 		By(fmt.Sprintf("Collecting events from namespace %q.", f.Namespace.Name))
-		events, err := f.Client.Events(f.Namespace.Name).List(labels.Everything(), fields.Everything())
+		events, err := f.Client.Events(f.Namespace.Name).List(api.ListOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		for _, e := range events.Items {
@@ -88,6 +119,8 @@ func (f *Framework) afterEach() {
 		// you may or may not see the killing/deletion/cleanup events.
 
 		dumpAllPodInfo(f.Client)
+
+		dumpAllNodeInfo(f.Client)
 	}
 
 	// Check whether all nodes are ready after the test.
@@ -95,10 +128,27 @@ func (f *Framework) afterEach() {
 		Failf("All nodes should be ready after test, %v", err)
 	}
 
-	By(fmt.Sprintf("Destroying namespace %q for this suite.", f.Namespace.Name))
+	if testContext.DeleteNamespace {
+		By(fmt.Sprintf("Destroying namespace %q for this suite.", f.Namespace.Name))
 
-	if err := deleteNS(f.Client, f.Namespace.Name); err != nil {
-		Failf("Couldn't delete ns %q: %s", f.Namespace.Name, err)
+		timeout := 5 * time.Minute
+		if f.NamespaceDeletionTimeout != 0 {
+			timeout = f.NamespaceDeletionTimeout
+		}
+		if err := deleteNS(f.Client, f.Namespace.Name, timeout); err != nil {
+			Failf("Couldn't delete ns %q: %s", f.Namespace.Name, err)
+		}
+	} else {
+		Logf("Found DeleteNamespace=false, skipping namespace deletion!")
+	}
+
+	if testContext.GatherKubeSystemResourceUsageData {
+		f.gatherer.stopAndPrintData([]int{50, 90, 99, 100}, f.addonResourceConstraints)
+	}
+
+	if testContext.GatherLogsSizes {
+		close(f.logsSizeCloseChannel)
+		f.logsSizeWaitGroup.Wait()
 	}
 	// Paranoia-- prevent reuse!
 	f.Namespace = nil
@@ -110,9 +160,20 @@ func (f *Framework) WaitForPodRunning(podName string) error {
 	return waitForPodRunningInNamespace(f.Client, podName, f.Namespace.Name)
 }
 
+// WaitForPodRunningSlow waits for the pod to run in the namespace.
+// It has a longer timeout then WaitForPodRunning (util.slowPodStartTimeout).
+func (f *Framework) WaitForPodRunningSlow(podName string) error {
+	return waitForPodRunningInNamespaceSlow(f.Client, podName, f.Namespace.Name)
+}
+
 // Runs the given pod and verifies that the output of exact container matches the desired output.
 func (f *Framework) TestContainerOutput(scenarioName string, pod *api.Pod, containerIndex int, expectedOutput []string) {
-	testContainerOutputInNamespace(scenarioName, f.Client, pod, containerIndex, expectedOutput, f.Namespace.Name)
+	testContainerOutput(scenarioName, f.Client, pod, containerIndex, expectedOutput, f.Namespace.Name)
+}
+
+// Runs the given pod and verifies that the output of exact container matches the desired regexps.
+func (f *Framework) TestContainerOutputRegexp(scenarioName string, pod *api.Pod, containerIndex int, expectedOutput []string) {
+	testContainerOutputRegexp(scenarioName, f.Client, pod, containerIndex, expectedOutput, f.Namespace.Name)
 }
 
 // WaitForAnEndpoint waits for at least one endpoint to become available in the
@@ -121,7 +182,7 @@ func (f *Framework) WaitForAnEndpoint(serviceName string) error {
 	for {
 		// TODO: Endpoints client should take a field selector so we
 		// don't have to list everything.
-		list, err := f.Client.Endpoints(f.Namespace.Name).List(labels.Everything())
+		list, err := f.Client.Endpoints(f.Namespace.Name).List(api.ListOptions{})
 		if err != nil {
 			return err
 		}
@@ -136,11 +197,11 @@ func (f *Framework) WaitForAnEndpoint(serviceName string) error {
 			}
 		}
 
-		w, err := f.Client.Endpoints(f.Namespace.Name).Watch(
-			labels.Everything(),
-			fields.Set{"metadata.name": serviceName}.AsSelector(),
-			rv,
-		)
+		options := api.ListOptions{
+			FieldSelector:   fields.Set{"metadata.name": serviceName}.AsSelector(),
+			ResourceVersion: rv,
+		}
+		w, err := f.Client.Endpoints(f.Namespace.Name).Watch(options)
 		if err != nil {
 			return err
 		}

@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/devel/development.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/devel/development.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -89,6 +89,16 @@ git remote set-url --push upstream no_push
 
 ### Committing changes to your fork
 
+Before committing any changes, please link/copy these pre-commit hooks into your .git
+directory. This will keep you from accidentally committing non-gofmt'd go code.
+
+```sh
+cd kubernetes/.git/hooks/
+ln -s ../../hooks/pre-commit .
+```
+
+Then you can commit your changes and push them to your fork:
+
 ```sh
 git commit
 git push -f origin myfeature
@@ -96,7 +106,7 @@ git push -f origin myfeature
 
 ### Creating a pull request
 
-1. Visit http://github.com/$YOUR_GITHUB_USERNAME/kubernetes
+1. Visit https://github.com/$YOUR_GITHUB_USERNAME/kubernetes
 2. Click the "Compare and pull request" button next to your "myfeature" branch.
 3. Check out the pull request [process](pull-requests.md) for more details
 
@@ -111,6 +121,8 @@ pass tests independently, but it is worth striving for.  For mass automated
 fixups (e.g. automated doc formatting), use one or more commits for the
 changes to tooling and a final commit to apply the fixup en masse.  This makes
 reviews much easier.
+
+See [Faster Reviews](faster_reviews.md) for more details.
 
 ## godep and dependency management
 
@@ -168,7 +180,7 @@ export GOPATH=$KPATH
 3) Populate your new GOPATH.
 
 ```sh
-cd $KPATH/src/github.com/kubernetes/kubernetes
+cd $KPATH/src/k8s.io/kubernetes
 godep restore
 ```
 
@@ -200,16 +212,6 @@ updated by godeps.  It then may be necessary to perform a `godep save ./...` to 
 It is sometimes expedient to manually fix the /Godeps/godeps.json file to minimize the changes.
 
 Please send dependency updates in separate commits within your PR, for easier reviewing.
-
-## Hooks
-
-Before committing any changes, please link/copy these hooks into your .git
-directory. This will keep you from accidentally committing non-gofmt'd go code.
-
-```sh
-cd kubernetes/.git/hooks/
-ln -s ../../hooks/pre-commit .
-```
 
 ## Unit tests
 
@@ -262,7 +264,9 @@ Coverage results for the project can also be viewed on [Coveralls](https://cover
 
 ## Integration tests
 
-You need an [etcd](https://github.com/coreos/etcd/releases/tag/v2.0.0) in your path, please make sure it is installed and in your ``$PATH``.
+You need an [etcd](https://github.com/coreos/etcd/releases) in your path. To download a copy of the latest version used by Kubernetes, either
+ * run `hack/install-etcd.sh`, which will download etcd to `third_party/etcd`, and then set your `PATH` to include `third_party/etcd`.
+ * inspect `cluster/saltbase/salt/etcd/etcd.manifest` for the correct version, and then manually download and install it to some place in your `PATH`.
 
 ```sh
 cd kubernetes

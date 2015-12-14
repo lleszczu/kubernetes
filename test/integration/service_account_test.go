@@ -33,7 +33,6 @@ import (
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/latest"
 	"k8s.io/kubernetes/pkg/api/testapi"
 	"k8s.io/kubernetes/pkg/auth/authenticator"
 	"k8s.io/kubernetes/pkg/auth/authenticator/bearertoken"
@@ -41,14 +40,12 @@ import (
 	"k8s.io/kubernetes/pkg/auth/user"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/controller/serviceaccount"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/master"
-	"k8s.io/kubernetes/pkg/tools/etcdtest"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/sets"
 	"k8s.io/kubernetes/pkg/util/wait"
 	serviceaccountadmission "k8s.io/kubernetes/plugin/pkg/admission/serviceaccount"
 	"k8s.io/kubernetes/plugin/pkg/auth/authenticator/request/union"
+	"k8s.io/kubernetes/test/integration/framework"
 )
 
 const (
@@ -170,10 +167,10 @@ func TestServiceAccountTokenAutoCreate(t *testing.T) {
 	}
 
 	// Wait for tokens to be deleted
-	tokensToCleanup := util.NewStringSet(token1Name, token2Name, token3Name)
+	tokensToCleanup := sets.NewString(token1Name, token2Name, token3Name)
 	err = wait.Poll(time.Second, 10*time.Second, func() (bool, error) {
 		// Get all secrets in the namespace
-		secrets, err := c.Secrets(ns).List(labels.Everything(), fields.Everything())
+		secrets, err := c.Secrets(ns).List(api.ListOptions{})
 		// Retrieval errors should fail
 		if err != nil {
 			return false, err
@@ -340,12 +337,6 @@ func startServiceAccountTestServer(t *testing.T) (*client.Client, client.Config,
 
 	deleteAllEtcdKeys()
 
-	// Etcd
-	etcdStorage, err := master.NewEtcdStorage(newEtcdClient(), latest.InterfacesFor, testapi.Version(), etcdtest.PathPrefix())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
 	// Listener
 	var m *master.Master
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -353,9 +344,9 @@ func startServiceAccountTestServer(t *testing.T) (*client.Client, client.Config,
 	}))
 
 	// Anonymous client config
-	clientConfig := client.Config{Host: apiServer.URL, Version: testapi.Version()}
+	clientConfig := client.Config{Host: apiServer.URL, GroupVersion: testapi.Default.GroupVersion()}
 	// Root client
-	rootClient := client.NewOrDie(&client.Config{Host: apiServer.URL, Version: testapi.Version(), BearerToken: rootToken})
+	rootClient := client.NewOrDie(&client.Config{Host: apiServer.URL, GroupVersion: testapi.Default.GroupVersion(), BearerToken: rootToken})
 
 	// Set up two authenticators:
 	// 1. A token authenticator that maps the rootToken to the "root" user
@@ -366,7 +357,7 @@ func startServiceAccountTestServer(t *testing.T) (*client.Client, client.Config,
 		}
 		return nil, false, nil
 	})
-	serviceAccountKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	serviceAccountKey, _ := rsa.GenerateKey(rand.Reader, 2048)
 	serviceAccountTokenGetter := serviceaccount.NewGetterFromClient(rootClient)
 	serviceAccountTokenAuth := serviceaccount.JWTTokenAuthenticator([]*rsa.PublicKey{&serviceAccountKey.PublicKey}, true, serviceAccountTokenGetter)
 	authenticator := union.New(
@@ -409,18 +400,14 @@ func startServiceAccountTestServer(t *testing.T) (*client.Client, client.Config,
 	// Set up admission plugin to auto-assign serviceaccounts to pods
 	serviceAccountAdmission := serviceaccountadmission.NewServiceAccount(rootClient)
 
+	masterConfig := framework.NewMasterConfig()
+	masterConfig.EnableIndex = true
+	masterConfig.Authenticator = authenticator
+	masterConfig.Authorizer = authorizer
+	masterConfig.AdmissionControl = serviceAccountAdmission
+
 	// Create a master and install handlers into mux.
-	m = master.New(&master.Config{
-		DatabaseStorage:   etcdStorage,
-		KubeletClient:     client.FakeKubeletClient{},
-		EnableLogsSupport: false,
-		EnableUISupport:   false,
-		EnableIndex:       true,
-		APIPrefix:         "/api",
-		Authenticator:     authenticator,
-		Authorizer:        authorizer,
-		AdmissionControl:  serviceAccountAdmission,
-	})
+	m = master.New(masterConfig)
 
 	// Start the service account and service account token controllers
 	tokenController := serviceaccount.NewTokensController(rootClient, serviceaccount.TokensControllerOptions{TokenGenerator: serviceaccount.JWTTokenGenerator(serviceAccountKey)})
@@ -523,8 +510,14 @@ func doServiceAccountAPIRequests(t *testing.T, c *client.Client, ns string, auth
 	}
 
 	readOps := []testOperation{
-		func() error { _, err := c.Secrets(ns).List(labels.Everything(), fields.Everything()); return err },
-		func() error { _, err := c.Pods(ns).List(labels.Everything(), fields.Everything()); return err },
+		func() error {
+			_, err := c.Secrets(ns).List(api.ListOptions{})
+			return err
+		},
+		func() error {
+			_, err := c.Pods(ns).List(api.ListOptions{})
+			return err
+		},
 	}
 	writeOps := []testOperation{
 		func() error { _, err := c.Secrets(ns).Create(testSecret); return err },

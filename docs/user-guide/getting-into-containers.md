@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/user-guide/getting-into-containers.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/user-guide/getting-into-containers.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -30,7 +30,9 @@ Documentation for other releases can be found at
 <!-- END STRIP_FOR_RELEASE -->
 
 <!-- END MUNGE: UNVERSIONED_WARNING -->
-﻿#Getting into containers: kubectl exec
+
+# Getting into containers: kubectl exec
+
 Developers can use `kubectl exec` to run commands in a container. This guide demonstrates two use cases.
 
 ## Using kubectl exec to check the environment variables of a container

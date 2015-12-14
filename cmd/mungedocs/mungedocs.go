@@ -29,6 +29,7 @@ import (
 )
 
 var (
+	verbose = flag.Bool("verbose", false, "On verification failure, emit pre-munge and post-munge versions.")
 	verify  = flag.Bool("verify", false, "Exit with status 1 if files would have needed changes but do not change.")
 	rootDir = flag.String("root-dir", "", "Root directory containing documents to be processed.")
 	// "repo-root" seems like a dumb name, this is the relative path (from rootDir) to get to the repoRoot
@@ -46,6 +47,9 @@ Examples:
 	// All of the munge operations to perform.
 	// TODO: allow selection from command line. (e.g., just check links in the examples directory.)
 	allMunges = []munge{
+		// Simple "check something" functions must run first.
+		{"preformat-balance", checkPreformatBalance},
+		// Functions which modify state.
 		{"remove-whitespace", updateWhitespace},
 		{"table-of-contents", updateTOC},
 		{"unversioned-warning", updateUnversionedWarning},
@@ -105,6 +109,10 @@ func (f fileProcessor) visit(path string) error {
 				filePrinted = true
 			}
 			fmt.Printf("%s:\n", munge.name)
+			if *verbose {
+				fmt.Printf("INPUT: <<<%v>>>\n", mungeLines)
+				fmt.Printf("MUNGED: <<<%v>>>\n", after)
+			}
 			if err != nil {
 				fmt.Println(err)
 				errFound = true

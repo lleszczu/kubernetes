@@ -14,14 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package nodecontroller
+package node
 
 import (
 	"container/heap"
 	"sync"
 	"time"
 
+	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/sets"
 )
 
 // TimedValue is a value that should be processed at a designated time.
@@ -58,7 +60,7 @@ func (h *TimedQueue) Pop() interface{} {
 type UniqueQueue struct {
 	lock  sync.Mutex
 	queue TimedQueue
-	set   util.StringSet
+	set   sets.String
 }
 
 // Adds a new value to the queue if it wasn't added before, or was explicitly removed by the
@@ -136,19 +138,16 @@ func (q *UniqueQueue) Head() (TimedValue, bool) {
 type RateLimitedTimedQueue struct {
 	queue   UniqueQueue
 	limiter util.RateLimiter
-	leak    bool
 }
 
-// Creates new queue which will use given RateLimiter to oversee execution. If leak is true,
-// items which are rate limited will be leakped. Otherwise, rate limited items will be requeued.
-func NewRateLimitedTimedQueue(limiter util.RateLimiter, leak bool) *RateLimitedTimedQueue {
+// Creates new queue which will use given RateLimiter to oversee execution.
+func NewRateLimitedTimedQueue(limiter util.RateLimiter) *RateLimitedTimedQueue {
 	return &RateLimitedTimedQueue{
 		queue: UniqueQueue{
 			queue: TimedQueue{},
-			set:   util.NewStringSet(),
+			set:   sets.NewString(),
 		},
 		limiter: limiter,
-		leak:    leak,
 	}
 }
 
@@ -164,20 +163,15 @@ func (q *RateLimitedTimedQueue) Try(fn ActionFunc) {
 	val, ok := q.queue.Head()
 	for ok {
 		// rate limit the queue checking
-		if q.leak {
-			if !q.limiter.CanAccept() {
-				break
-			}
-		} else {
-			q.limiter.Accept()
+		if !q.limiter.TryAccept() {
+			glog.V(10).Info("Try rate limitted...")
+			// Try again later
+			break
 		}
 
 		now := now()
 		if now.Before(val.ProcessAt) {
-			q.queue.Replace(val)
-			val, ok = q.queue.Head()
-			// we do not sleep here because other values may be added at the front of the queue
-			continue
+			break
 		}
 
 		if ok, wait := fn(val); !ok {

@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/getting-started-guides/coreos/bare_metal_offline.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/getting-started-guides/coreos/bare_metal_offline.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -412,7 +412,7 @@ On the PXE server make and fill in the variables `vi /var/www/html/coreos/pxe-cl
           content: |
             [Unit]
             Description=Kubernetes API Server
-            Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+            Documentation=https://github.com/kubernetes/kubernetes
             Requires=etcd.service
             After=etcd.service
             [Service]
@@ -432,7 +432,7 @@ On the PXE server make and fill in the variables `vi /var/www/html/coreos/pxe-cl
           content: |
             [Unit]
             Description=Kubernetes Controller Manager
-            Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+            Documentation=https://github.com/kubernetes/kubernetes
             Requires=kube-apiserver.service
             After=kube-apiserver.service
             [Service]
@@ -448,7 +448,7 @@ On the PXE server make and fill in the variables `vi /var/www/html/coreos/pxe-cl
           content: |
             [Unit]
             Description=Kubernetes Scheduler
-            Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+            Documentation=https://github.com/kubernetes/kubernetes
             Requires=kube-apiserver.service
             After=kube-apiserver.service
             [Service]
@@ -579,7 +579,7 @@ On the PXE server make and fill in the variables `vi /var/www/html/coreos/pxe-cl
           content: |
             [Unit]
             Description=Kubernetes Proxy
-            Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+            Documentation=https://github.com/kubernetes/kubernetes
             Requires=setup-network-environment.service
             After=setup-network-environment.service
             [Service]
@@ -595,7 +595,7 @@ On the PXE server make and fill in the variables `vi /var/www/html/coreos/pxe-cl
           content: |
             [Unit]
             Description=Kubernetes Kubelet
-            Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+            Documentation=https://github.com/kubernetes/kubernetes
             Requires=setup-network-environment.service
             After=setup-network-environment.service
             [Service]
@@ -699,7 +699,7 @@ List Kubernetes
 
 Kill all pods:
 
-    for i in `kubectl get pods | awk '{print $1}'`; do kubectl stop pod $i; done
+    for i in `kubectl get pods | awk '{print $1}'`; do kubectl delete pod $i; done
 
 
 <!-- BEGIN MUNGE: GENERATED_ANALYTICS -->

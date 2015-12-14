@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/roadmap.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/roadmap.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -33,9 +33,7 @@ Documentation for other releases can be found at
 
 # Kubernetes Roadmap
 
-We're in the process of prioritizing changes to be made after 1.0.
-
-Please watch the [Github milestones] (https://github.com/GoogleCloudPlatform/kubernetes/milestones) for our future plans.
+Please watch the [Github milestones] (https://github.com/kubernetes/kubernetes/milestones) for our future plans.
 
 
 <!-- BEGIN MUNGE: GENERATED_ANALYTICS -->

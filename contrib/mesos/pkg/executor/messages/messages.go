@@ -25,7 +25,9 @@ const (
 	ExecutorUnregistered     = "executor-unregistered"
 	ExecutorShutdown         = "executor-shutdown"
 	LaunchTaskFailed         = "launch-task-failed"
+	KubeletPodLaunchFailed   = "kubelet-pod-launch-failed"
 	TaskKilled               = "task-killed"
+	TaskLost                 = "task-lost"
 	UnmarshalTaskDataFailure = "unmarshal-task-data-failure"
 	TaskLostAck              = "task-lost-ack" // executor acknowledgement of forwarded TASK_LOST framework message
 	Kamikaze                 = "kamikaze"

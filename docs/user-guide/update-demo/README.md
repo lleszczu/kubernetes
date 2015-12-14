@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/user-guide/update-demo/README.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/user-guide/update-demo/README.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -114,7 +114,7 @@ But if the replica count had been specified, the final replica count of the new 
 ### Step Five: Bring down the pods
 
 ```console
-$ kubectl stop rc update-demo-kitten
+$ kubectl delete rc update-demo-kitten
 ```
 
 This first stops the replication controller by turning the target number of replicas to 0 and then deletes the controller.

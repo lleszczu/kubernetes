@@ -38,7 +38,7 @@ func CoreDump(dir string) {
 	provider := testContext.Provider
 
 	// requires ssh
-	if !providerIs("gce", "gke") {
+	if !providerIs(providersWithSSH...) {
 		fmt.Printf("Skipping SSH core dump, which is not implemented for %s", provider)
 		return
 	}
@@ -85,11 +85,11 @@ func logCore(cmds []command, hosts []string, dir, provider string) {
 				defer wg.Done()
 				logfile := fmt.Sprintf("%s/%s-%s.log", dir, host, cmd.component)
 				fmt.Printf("Writing to %s.\n", logfile)
-				stdout, stderr, _, err := SSH(cmd.cmd, host, provider)
+				result, err := SSH(cmd.cmd, host, provider)
 				if err != nil {
 					fmt.Printf("Error running command: %v\n", err)
 				}
-				if err := ioutil.WriteFile(logfile, []byte(stdout+stderr), 0777); err != nil {
+				if err := ioutil.WriteFile(logfile, []byte(result.Stdout+result.Stderr), 0777); err != nil {
 					fmt.Printf("Error writing logfile: %v\n", err)
 				}
 			}(cmd, host)

@@ -26,11 +26,16 @@ import (
 	"strings"
 
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	_ "k8s.io/kubernetes/pkg/api/v1"
-	_ "k8s.io/kubernetes/pkg/expapi"
-	_ "k8s.io/kubernetes/pkg/expapi/v1"
-	pkg_runtime "k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util"
+	_ "k8s.io/kubernetes/pkg/apis/componentconfig"
+	_ "k8s.io/kubernetes/pkg/apis/componentconfig/v1alpha1"
+	_ "k8s.io/kubernetes/pkg/apis/extensions"
+	_ "k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
+	_ "k8s.io/kubernetes/pkg/apis/metrics"
+	_ "k8s.io/kubernetes/pkg/apis/metrics/v1alpha1"
+	kruntime "k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/util/sets"
 
 	"github.com/golang/glog"
 	flag "github.com/spf13/pflag"
@@ -44,6 +49,32 @@ var (
 	groupVersion = flag.StringP("version", "v", "", "groupPath/version for deep copies.")
 	overwrites   = flag.StringP("overwrites", "o", "", "Comma-separated overwrites for package names")
 )
+
+// types inside the api package don't need to say "api.Scheme"; all others do.
+func destScheme(gv unversioned.GroupVersion) string {
+	if gv == api.SchemeGroupVersion {
+		return "Scheme"
+	}
+	return "api.Scheme"
+}
+
+// We're moving to pkg/apis/group/version. This handles new and legacy packages.
+func pkgPath(group, version string) string {
+	if group == "" {
+		group = "api"
+	}
+	gv := group
+	if version != "" {
+		gv = path.Join(group, version)
+	}
+	switch {
+	case group == "api":
+		// TODO(lavalamp): remove this special case when we move api to apis/api
+		return path.Join(pkgBase, gv)
+	default:
+		return path.Join(pkgBase, "apis", gv)
+	}
+}
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
@@ -63,24 +94,27 @@ func main() {
 
 	data := new(bytes.Buffer)
 
-	group, version := path.Split(*groupVersion)
-	group = strings.TrimRight(group, "/")
-	registerTo := "api.Scheme"
-	if *groupVersion == "api/" {
-		registerTo = "Scheme"
+	gv := unversioned.ParseGroupVersionOrDie(*groupVersion)
+
+	registerTo := destScheme(gv)
+	var pkgname string
+	if gv.Group == "" {
+		// the internal version of v1 is registered in package api
+		pkgname = "api"
+	} else {
+		pkgname = gv.Group
 	}
-	pkgname := group
-	if len(version) != 0 {
-		pkgname = version
+	if len(gv.Version) != 0 {
+		pkgname = gv.Version
 	}
 
 	_, err := data.WriteString(fmt.Sprintf("package %s\n", pkgname))
 	if err != nil {
-		glog.Fatalf("error writing package line: %v", err)
+		glog.Fatalf("Error while writing package line: %v", err)
 	}
 
-	versionPath := path.Join(pkgBase, group, version)
-	generator := pkg_runtime.NewDeepCopyGenerator(api.Scheme.Raw(), versionPath, util.NewStringSet("k8s.io/kubernetes"))
+	versionPath := pkgPath(gv.Group, gv.Version)
+	generator := kruntime.NewDeepCopyGenerator(api.Scheme.Raw(), versionPath, sets.NewString("k8s.io/kubernetes"))
 	generator.AddImport(path.Join(pkgBase, "api"))
 
 	if len(*overwrites) > 0 {
@@ -92,29 +126,30 @@ func main() {
 			generator.OverwritePackage(vals[0], vals[1])
 		}
 	}
-	for _, knownType := range api.Scheme.KnownTypes(version) {
-		if !strings.HasPrefix(knownType.PkgPath(), versionPath) {
+
+	for _, knownType := range api.Scheme.KnownTypes(gv) {
+		if knownType.PkgPath() != versionPath {
 			continue
 		}
 		if err := generator.AddType(knownType); err != nil {
-			glog.Errorf("error while generating deep copy functions for %v: %v", knownType, err)
+			glog.Errorf("Error while generating deep copy functions for %v: %v", knownType, err)
 		}
 	}
 	generator.RepackImports()
 	if err := generator.WriteImports(data); err != nil {
-		glog.Fatalf("error while writing imports: %v", err)
+		glog.Fatalf("Error while writing imports: %v", err)
 	}
 	if err := generator.WriteDeepCopyFunctions(data); err != nil {
-		glog.Fatalf("error while writing deep copy functions: %v", err)
+		glog.Fatalf("Error while writing deep copy functions: %v", err)
 	}
 	if err := generator.RegisterDeepCopyFunctions(data, registerTo); err != nil {
-		glog.Fatalf("error while registering deep copy functions: %v", err)
+		glog.Fatalf("Error while registering deep copy functions: %v", err)
 	}
 	b, err := imports.Process("", data.Bytes(), nil)
 	if err != nil {
-		glog.Fatalf("error while update imports: %v", err)
+		glog.Fatalf("Error while update imports: %v", err)
 	}
 	if _, err := funcOut.Write(b); err != nil {
-		glog.Fatalf("error while writing out the resulting file: %v", err)
+		glog.Fatalf("Error while writing out the resulting file: %v", err)
 	}
 }

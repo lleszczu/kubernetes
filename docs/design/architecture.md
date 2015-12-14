@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/design/architecture.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/design/architecture.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -51,7 +51,7 @@ The `kubelet` manages [pods](../user-guide/pods.md) and their containers, their 
 
 ### `kube-proxy`
 
-Each node also runs a simple network proxy and load balancer (see the [services FAQ](https://github.com/GoogleCloudPlatform/kubernetes/wiki/Services-FAQ) for more details).  This reflects `services` (see [the services doc](../user-guide/services.md) for more details) as defined in the Kubernetes API on each node and can do simple TCP and UDP stream forwarding (round robin) across a set of backends.
+Each node also runs a simple network proxy and load balancer (see the [services FAQ](https://github.com/kubernetes/kubernetes/wiki/Services-FAQ) for more details).  This reflects `services` (see [the services doc](../user-guide/services.md) for more details) as defined in the Kubernetes API on each node and can do simple TCP and UDP stream forwarding (round robin) across a set of backends.
 
 Service endpoints are currently found via [DNS](../admin/dns.md) or through environment variables (both [Docker-links-compatible](https://docs.docker.com/userguide/dockerlinks/) and Kubernetes `{FOO}_SERVICE_HOST` and `{FOO}_SERVICE_PORT` variables are supported).  These variables resolve to ports managed by the service proxy.
 

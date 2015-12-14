@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/design/expansion.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/design/expansion.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -265,7 +265,7 @@ type ObjectEventRecorder interface {
 	Eventf(reason, messageFmt string, args ...interface{})
 
 	// PastEventf is just like Eventf, but with an option to specify the event's 'timestamp' field.
-	PastEventf(timestamp util.Time, reason, messageFmt string, args ...interface{})
+	PastEventf(timestamp unversioned.Time, reason, messageFmt string, args ...interface{})
 }
 ```
 

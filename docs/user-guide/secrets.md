@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/user-guide/secrets.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/user-guide/secrets.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -165,7 +165,7 @@ Use of imagePullSecrets is described in the [images documentation](images.md#spe
 
 You can manually create an imagePullSecret, and reference it from
 a serviceAccount.  Any pods created with that serviceAccount
-or that default to use that serviceAccount, will get have the imagePullSecret of the
+or that default to use that serviceAccount, will get their imagePullSecret
 field set to that of the service account.
 See [here](service-accounts.md#adding-imagepullsecrets-to-a-service-account)
  for a detailed explanation of that process.

@@ -17,13 +17,14 @@ limitations under the License.
 package etcd
 
 import (
+	"net/http"
 	"sync"
 	"time"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/storage"
-	"k8s.io/kubernetes/pkg/tools"
+	etcdutil "k8s.io/kubernetes/pkg/storage/etcd/util"
 	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/watch"
 
@@ -117,7 +118,7 @@ func newEtcdWatcher(list bool, include includeFunc, filter storage.FilterFunc, e
 
 // etcdWatch calls etcd's Watch function, and handles any errors. Meant to be called
 // as a goroutine.
-func (w *etcdWatcher) etcdWatch(client tools.EtcdClient, key string, resourceVersion uint64) {
+func (w *etcdWatcher) etcdWatch(client *etcd.Client, key string, resourceVersion uint64) {
 	defer util.HandleCrash()
 	defer close(w.etcdError)
 	if resourceVersion == 0 {
@@ -135,15 +136,15 @@ func (w *etcdWatcher) etcdWatch(client tools.EtcdClient, key string, resourceVer
 }
 
 // etcdGetInitialWatchState turns an etcd Get request into a watch equivalent
-func etcdGetInitialWatchState(client tools.EtcdClient, key string, recursive bool, incoming chan<- *etcd.Response) (resourceVersion uint64, err error) {
+func etcdGetInitialWatchState(client *etcd.Client, key string, recursive bool, incoming chan<- *etcd.Response) (resourceVersion uint64, err error) {
 	resp, err := client.Get(key, false, recursive)
 	if err != nil {
-		if !IsEtcdNotFound(err) {
+		if !etcdutil.IsEtcdNotFound(err) {
 			glog.Errorf("watch was unable to retrieve the current index for the provided key (%q): %v", key, err)
 			return resourceVersion, err
 		}
-		if index, ok := etcdErrorIndex(err); ok {
-			resourceVersion = index
+		if etcdError, ok := err.(*etcd.EtcdError); ok {
+			resourceVersion = etcdError.Index
 		}
 		return resourceVersion, nil
 	}
@@ -181,12 +182,30 @@ func (w *etcdWatcher) translate() {
 		select {
 		case err := <-w.etcdError:
 			if err != nil {
-				w.emit(watch.Event{
-					Type: watch.Error,
-					Object: &api.Status{
-						Status:  api.StatusFailure,
+				var status *unversioned.Status
+				switch {
+				case etcdutil.IsEtcdWatchExpired(err):
+					status = &unversioned.Status{
+						Status:  unversioned.StatusFailure,
 						Message: err.Error(),
-					},
+						Code:    http.StatusGone, // Gone
+						Reason:  unversioned.StatusReasonExpired,
+					}
+				// TODO: need to generate errors using api/errors which has a circular dependency on this package
+				//   no other way to inject errors
+				// case etcdutil.IsEtcdUnreachable(err):
+				//   status = errors.NewServerTimeout(...)
+				default:
+					status = &unversioned.Status{
+						Status:  unversioned.StatusFailure,
+						Message: err.Error(),
+						Code:    http.StatusInternalServerError,
+						Reason:  unversioned.StatusReasonInternalError,
+					}
+				}
+				w.emit(watch.Event{
+					Type:   watch.Error,
+					Object: status,
 				})
 			}
 			return
@@ -208,7 +227,7 @@ func (w *etcdWatcher) translate() {
 }
 
 func (w *etcdWatcher) decodeObject(node *etcd.Node) (runtime.Object, error) {
-	if obj, found := w.cache.getFromCache(node.ModifiedIndex); found {
+	if obj, found := w.cache.getFromCache(node.ModifiedIndex, storage.Everything); found {
 		return obj, nil
 	}
 

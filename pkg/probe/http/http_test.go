@@ -17,6 +17,7 @@ limitations under the License.
 package http
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,17 @@ import (
 
 	"k8s.io/kubernetes/pkg/probe"
 )
+
+const FailureCode int = -1
+
+func containsAny(s string, substrs []string) bool {
+	for _, substr := range substrs {
+		if strings.Contains(s, substr) {
+			return true
+		}
+	}
+	return false
+}
 
 func TestHTTPProbeChecker(t *testing.T) {
 	handleReq := func(s int, body string) func(w http.ResponseWriter) {
@@ -41,12 +53,31 @@ func TestHTTPProbeChecker(t *testing.T) {
 	testCases := []struct {
 		handler func(w http.ResponseWriter)
 		health  probe.Result
-		body    string
+		// go1.5: error message changed for timeout, need to support
+		// both old and new
+		accBodies []string
 	}{
 		// The probe will be filled in below.  This is primarily testing that an HTTP GET happens.
-		{handleReq(http.StatusOK, "ok body"), probe.Success, "ok body"},
-		{handleReq(-1, "fail body"), probe.Failure, "fail body"},
-		{func(w http.ResponseWriter) { time.Sleep(3 * time.Second) }, probe.Failure, "use of closed network connection"},
+		{
+			handleReq(http.StatusOK, "ok body"),
+			probe.Success,
+			[]string{"ok body"},
+		},
+		{
+			handleReq(FailureCode, "fail body"),
+			probe.Failure,
+			[]string{fmt.Sprintf("HTTP probe failed with statuscode: %d", FailureCode)},
+		},
+		{
+			func(w http.ResponseWriter) {
+				time.Sleep(3 * time.Second)
+			},
+			probe.Failure,
+			[]string{
+				"use of closed network connection",
+				"request canceled (Client.Timeout exceeded while awaiting headers)",
+			},
+		},
 	}
 	for _, test := range testCases {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -74,8 +105,8 @@ func TestHTTPProbeChecker(t *testing.T) {
 		if health != test.health {
 			t.Errorf("Expected %v, got %v", test.health, health)
 		}
-		if !strings.Contains(output, test.body) {
-			t.Errorf("Expected %v, got %v", test.body, output)
+		if !containsAny(output, test.accBodies) {
+			t.Errorf("Expected one of %#v, got %v", test.accBodies, output)
 		}
 	}
 }

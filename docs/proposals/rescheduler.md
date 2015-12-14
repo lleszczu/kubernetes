@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/proposals/rescheduler.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/proposals/rescheduler.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -107,7 +107,7 @@ antagonism and ask the rescheduler to move one of the antagonists to a new node.
 The vast majority of users probably only care about rescheduling for three scenarios:
 
 1. Move Pods around to get a PENDING Pod to schedule
-1. Redistribute Pods onto new nodes added by a cluster auto-scaler when ther are no PENDING Pods
+1. Redistribute Pods onto new nodes added by a cluster auto-scaler when there are no PENDING Pods
 1. Move Pods around when CPU starvation is detected on a node
 
 ## Design considerations and design space
@@ -144,6 +144,7 @@ A key design question for a Rescheduler is how much knowledge it needs about the
 ## Appendix: Integrating rescheduler with cluster auto-scaler (scale up)
 
 For scaling up the cluster, a reasonable workflow might be:
+
 1. pod horizontal auto-scaler decides to add one or more Pods to a service, based on the metrics it is observing
 1. the Pod goes PENDING due to lack of a suitable node with sufficient resources
 1. rescheduler notices the PENDING Pod and determines that the Pod cannot schedule just by rearranging existing Pods (while respecting SLOs)

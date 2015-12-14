@@ -25,12 +25,16 @@ JSON and YAML formats are accepted.
     Filename, directory, or URL to file to use to create the resource
 
 .PP
-\fB\-h\fP, \fB\-\-help\fP=false
-    help for create
-
-.PP
 \fB\-o\fP, \fB\-\-output\fP=""
     Output mode. Use "\-o name" for shorter output (resource/name).
+
+.PP
+\fB\-\-save\-config\fP=false
+    If true, the configuration of current object will be saved in its annotation. This is useful when you want to perform kubectl apply on this object in the future.
+
+.PP
+\fB\-\-schema\-cache\-dir\fP="\~/.kube/schema"
+    If non\-empty, load/store cached API schemas in this directory, default is '$HOME/.kube/schema'
 
 .PP
 \fB\-\-validate\fP=true
@@ -52,7 +56,7 @@ JSON and YAML formats are accepted.
 
 .PP
 \fB\-\-client\-certificate\fP=""
-    Path to a client key file for TLS.
+    Path to a client certificate file for TLS.
 
 .PP
 \fB\-\-client\-key\fP=""

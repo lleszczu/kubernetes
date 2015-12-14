@@ -14,9 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package aws_cloud
+package aws
 
 import (
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -82,9 +83,9 @@ func TestReadAWSCloudConfig(t *testing.T) {
 
 	for _, test := range tests {
 		t.Logf("Running test case %s", test.name)
-		var metadata AWSMetadata
+		var metadata EC2Metadata
 		if test.aws != nil {
-			metadata = test.aws.Metadata()
+			metadata, _ = test.aws.Metadata()
 		}
 		cfg, err := readAWSCloudConfig(test.reader, metadata)
 		if test.expectError {
@@ -104,10 +105,14 @@ func TestReadAWSCloudConfig(t *testing.T) {
 }
 
 type FakeAWSServices struct {
-	availabilityZone string
-	instances        []*ec2.Instance
-	instanceId       string
-	privateDnsName   string
+	availabilityZone        string
+	instances               []*ec2.Instance
+	instanceId              string
+	privateDnsName          string
+	networkInterfacesMacs   []string
+	networkInterfacesVpcIDs []string
+	internalIP              string
+	externalIP              string
 
 	ec2      *FakeEC2
 	elb      *FakeELB
@@ -123,11 +128,14 @@ func NewFakeAWSServices() *FakeAWSServices {
 	s.asg = &FakeASG{aws: s}
 	s.metadata = &FakeMetadata{aws: s}
 
+	s.networkInterfacesMacs = []string{"aa:bb:cc:dd:ee:00", "aa:bb:cc:dd:ee:01"}
+	s.networkInterfacesVpcIDs = []string{"vpc-mac0", "vpc-mac1"}
+
 	s.instanceId = "i-self"
 	s.privateDnsName = "ip-172-20-0-100.ec2.internal"
 	var selfInstance ec2.Instance
-	selfInstance.InstanceID = &s.instanceId
-	selfInstance.PrivateDNSName = &s.privateDnsName
+	selfInstance.InstanceId = &s.instanceId
+	selfInstance.PrivateDnsName = &s.privateDnsName
 	s.instances = []*ec2.Instance{&selfInstance}
 
 	var tag ec2.Tag
@@ -160,8 +168,8 @@ func (s *FakeAWSServices) Autoscaling(region string) (ASG, error) {
 	return s.asg, nil
 }
 
-func (s *FakeAWSServices) Metadata() AWSMetadata {
-	return s.metadata
+func (s *FakeAWSServices) Metadata() (EC2Metadata, error) {
+	return s.metadata, nil
 }
 
 func TestFilterTags(t *testing.T) {
@@ -241,7 +249,9 @@ func TestNewAWSCloud(t *testing.T) {
 }
 
 type FakeEC2 struct {
-	aws *FakeAWSServices
+	aws                  *FakeAWSServices
+	Subnets              []*ec2.Subnet
+	DescribeSubnetsInput *ec2.DescribeSubnetsInput
 }
 
 func contains(haystack []*string, needle string) bool {
@@ -257,10 +267,10 @@ func contains(haystack []*string, needle string) bool {
 func instanceMatchesFilter(instance *ec2.Instance, filter *ec2.Filter) bool {
 	name := *filter.Name
 	if name == "private-dns-name" {
-		if instance.PrivateDNSName == nil {
+		if instance.PrivateDnsName == nil {
 			return false
 		}
-		return contains(filter.Values, *instance.PrivateDNSName)
+		return contains(filter.Values, *instance.PrivateDnsName)
 	}
 	panic("Unknown filter name: " + name)
 }
@@ -268,15 +278,15 @@ func instanceMatchesFilter(instance *ec2.Instance, filter *ec2.Filter) bool {
 func (self *FakeEC2) DescribeInstances(request *ec2.DescribeInstancesInput) ([]*ec2.Instance, error) {
 	matches := []*ec2.Instance{}
 	for _, instance := range self.aws.instances {
-		if request.InstanceIDs != nil {
-			if instance.InstanceID == nil {
+		if request.InstanceIds != nil {
+			if instance.InstanceId == nil {
 				glog.Warning("Instance with no instance id: ", instance)
 				continue
 			}
 
 			found := false
-			for _, instanceId := range request.InstanceIDs {
-				if *instanceId == *instance.InstanceID {
+			for _, instanceId := range request.InstanceIds {
+				if *instanceId == *instance.InstanceId {
 					found = true
 					break
 				}
@@ -307,19 +317,39 @@ type FakeMetadata struct {
 	aws *FakeAWSServices
 }
 
-func (self *FakeMetadata) GetMetaData(key string) ([]byte, error) {
+func (self *FakeMetadata) GetMetadata(key string) (string, error) {
+	networkInterfacesPrefix := "network/interfaces/macs/"
 	if key == "placement/availability-zone" {
-		return []byte(self.aws.availabilityZone), nil
+		return self.aws.availabilityZone, nil
 	} else if key == "instance-id" {
-		return []byte(self.aws.instanceId), nil
+		return self.aws.instanceId, nil
 	} else if key == "local-hostname" {
-		return []byte(self.aws.privateDnsName), nil
+		return self.aws.privateDnsName, nil
+	} else if key == "local-ipv4" {
+		return self.aws.internalIP, nil
+	} else if key == "public-ipv4" {
+		return self.aws.externalIP, nil
+	} else if strings.HasPrefix(key, networkInterfacesPrefix) {
+		if key == networkInterfacesPrefix {
+			return strings.Join(self.aws.networkInterfacesMacs, "/\n") + "/\n", nil
+		} else {
+			keySplit := strings.Split(key, "/")
+			macParam := keySplit[3]
+			if len(keySplit) == 5 && keySplit[4] == "vpc-id" {
+				for i, macElem := range self.aws.networkInterfacesMacs {
+					if macParam == macElem {
+						return self.aws.networkInterfacesVpcIDs[i], nil
+					}
+				}
+			}
+			return "", nil
+		}
 	} else {
-		return nil, nil
+		return "", nil
 	}
 }
 
-func (ec2 *FakeEC2) AttachVolume(volumeID, instanceId, mountDevice string) (resp *ec2.VolumeAttachment, err error) {
+func (ec2 *FakeEC2) AttachVolume(request *ec2.AttachVolumeInput) (resp *ec2.VolumeAttachment, err error) {
 	panic("Not implemented")
 }
 
@@ -335,7 +365,7 @@ func (ec2 *FakeEC2) CreateVolume(request *ec2.CreateVolumeInput) (resp *ec2.Volu
 	panic("Not implemented")
 }
 
-func (ec2 *FakeEC2) DeleteVolume(volumeID string) (resp *ec2.DeleteVolumeOutput, err error) {
+func (ec2 *FakeEC2) DeleteVolume(request *ec2.DeleteVolumeInput) (resp *ec2.DeleteVolumeOutput, err error) {
 	panic("Not implemented")
 }
 
@@ -359,12 +389,9 @@ func (ec2 *FakeEC2) RevokeSecurityGroupIngress(*ec2.RevokeSecurityGroupIngressIn
 	panic("Not implemented")
 }
 
-func (ec2 *FakeEC2) DescribeVPCs(*ec2.DescribeVPCsInput) ([]*ec2.VPC, error) {
-	panic("Not implemented")
-}
-
-func (ec2 *FakeEC2) DescribeSubnets(*ec2.DescribeSubnetsInput) ([]*ec2.Subnet, error) {
-	panic("Not implemented")
+func (ec2 *FakeEC2) DescribeSubnets(request *ec2.DescribeSubnetsInput) ([]*ec2.Subnet, error) {
+	ec2.DescribeSubnetsInput = request
+	return ec2.Subnets, nil
 }
 
 func (ec2 *FakeEC2) CreateTags(*ec2.CreateTagsInput) (*ec2.CreateTagsOutput, error) {
@@ -446,19 +473,18 @@ func (a *FakeASG) DescribeAutoScalingGroups(*autoscaling.DescribeAutoScalingGrou
 	panic("Not implemented")
 }
 
-func mockInstancesResp(instances []*ec2.Instance) *AWSCloud {
+func mockInstancesResp(instances []*ec2.Instance) (*AWSCloud, *FakeAWSServices) {
 	awsServices := NewFakeAWSServices().withInstances(instances)
 	return &AWSCloud{
-		awsServices:      awsServices,
 		ec2:              awsServices.ec2,
 		availabilityZone: awsServices.availabilityZone,
-	}
+		metadata:         &FakeMetadata{aws: awsServices},
+	}, awsServices
 }
 
 func mockAvailabilityZone(region string, availabilityZone string) *AWSCloud {
 	awsServices := NewFakeAWSServices().withAz(availabilityZone)
 	return &AWSCloud{
-		awsServices:      awsServices,
 		ec2:              awsServices.ec2,
 		availabilityZone: awsServices.availabilityZone,
 		region:           region,
@@ -478,8 +504,8 @@ func TestList(t *testing.T) {
 		Value: aws.String("foo"),
 	}
 	instance0.Tags = []*ec2.Tag{&tag0}
-	instance0.InstanceID = aws.String("instance0")
-	instance0.PrivateDNSName = aws.String("instance0.ec2.internal")
+	instance0.InstanceId = aws.String("instance0")
+	instance0.PrivateDnsName = aws.String("instance0.ec2.internal")
 	state0 := ec2.InstanceState{
 		Name: aws.String("running"),
 	}
@@ -491,8 +517,8 @@ func TestList(t *testing.T) {
 		Value: aws.String("bar"),
 	}
 	instance1.Tags = []*ec2.Tag{&tag1}
-	instance1.InstanceID = aws.String("instance1")
-	instance1.PrivateDNSName = aws.String("instance1.ec2.internal")
+	instance1.InstanceId = aws.String("instance1")
+	instance1.PrivateDnsName = aws.String("instance1.ec2.internal")
 	state1 := ec2.InstanceState{
 		Name: aws.String("running"),
 	}
@@ -504,8 +530,8 @@ func TestList(t *testing.T) {
 		Value: aws.String("baz"),
 	}
 	instance2.Tags = []*ec2.Tag{&tag2}
-	instance2.InstanceID = aws.String("instance2")
-	instance2.PrivateDNSName = aws.String("instance2.ec2.internal")
+	instance2.InstanceId = aws.String("instance2")
+	instance2.PrivateDnsName = aws.String("instance2.ec2.internal")
 	state2 := ec2.InstanceState{
 		Name: aws.String("running"),
 	}
@@ -517,15 +543,15 @@ func TestList(t *testing.T) {
 		Value: aws.String("quux"),
 	}
 	instance3.Tags = []*ec2.Tag{&tag3}
-	instance3.InstanceID = aws.String("instance3")
-	instance3.PrivateDNSName = aws.String("instance3.ec2.internal")
+	instance3.InstanceId = aws.String("instance3")
+	instance3.PrivateDnsName = aws.String("instance3.ec2.internal")
 	state3 := ec2.InstanceState{
 		Name: aws.String("running"),
 	}
 	instance3.State = &state3
 
 	instances := []*ec2.Instance{&instance0, &instance1, &instance2, &instance3}
-	aws := mockInstancesResp(instances)
+	aws, _ := mockInstancesResp(instances)
 
 	table := []struct {
 		input  string
@@ -563,10 +589,10 @@ func TestNodeAddresses(t *testing.T) {
 	var instance1 ec2.Instance
 
 	//0
-	instance0.InstanceID = aws.String("instance-same")
-	instance0.PrivateDNSName = aws.String("instance-same.ec2.internal")
-	instance0.PrivateIPAddress = aws.String("192.168.0.1")
-	instance0.PublicIPAddress = aws.String("1.2.3.4")
+	instance0.InstanceId = aws.String("instance-same")
+	instance0.PrivateDnsName = aws.String("instance-same.ec2.internal")
+	instance0.PrivateIpAddress = aws.String("192.168.0.1")
+	instance0.PublicIpAddress = aws.String("1.2.3.4")
 	instance0.InstanceType = aws.String("c3.large")
 	state0 := ec2.InstanceState{
 		Name: aws.String("running"),
@@ -574,9 +600,9 @@ func TestNodeAddresses(t *testing.T) {
 	instance0.State = &state0
 
 	//1
-	instance1.InstanceID = aws.String("instance-same")
-	instance1.PrivateDNSName = aws.String("instance-same.ec2.internal")
-	instance1.PrivateIPAddress = aws.String("192.168.0.2")
+	instance1.InstanceId = aws.String("instance-same")
+	instance1.PrivateDnsName = aws.String("instance-same.ec2.internal")
+	instance1.PrivateIpAddress = aws.String("192.168.0.2")
 	instance1.InstanceType = aws.String("c3.large")
 	state1 := ec2.InstanceState{
 		Name: aws.String("running"),
@@ -585,19 +611,19 @@ func TestNodeAddresses(t *testing.T) {
 
 	instances := []*ec2.Instance{&instance0, &instance1}
 
-	aws1 := mockInstancesResp([]*ec2.Instance{})
+	aws1, _ := mockInstancesResp([]*ec2.Instance{})
 	_, err1 := aws1.NodeAddresses("instance-mismatch.ec2.internal")
 	if err1 == nil {
 		t.Errorf("Should error when no instance found")
 	}
 
-	aws2 := mockInstancesResp(instances)
+	aws2, _ := mockInstancesResp(instances)
 	_, err2 := aws2.NodeAddresses("instance-same.ec2.internal")
 	if err2 == nil {
 		t.Errorf("Should error when multiple instances found")
 	}
 
-	aws3 := mockInstancesResp(instances[0:1])
+	aws3, _ := mockInstancesResp(instances[0:1])
 	addrs3, err3 := aws3.NodeAddresses("instance-same.ec2.internal")
 	if err3 != nil {
 		t.Errorf("Should not error when instance found")
@@ -608,6 +634,18 @@ func TestNodeAddresses(t *testing.T) {
 	testHasNodeAddress(t, addrs3, api.NodeInternalIP, "192.168.0.1")
 	testHasNodeAddress(t, addrs3, api.NodeLegacyHostIP, "192.168.0.1")
 	testHasNodeAddress(t, addrs3, api.NodeExternalIP, "1.2.3.4")
+
+	aws4, fakeServices := mockInstancesResp([]*ec2.Instance{})
+	fakeServices.externalIP = "2.3.4.5"
+	fakeServices.internalIP = "192.168.0.2"
+	aws4.selfAWSInstance = &awsInstance{nodeName: fakeServices.instanceId}
+
+	addrs4, err4 := aws4.NodeAddresses(fakeServices.instanceId)
+	if err4 != nil {
+		t.Errorf("unexpected error: %v", err4)
+	}
+	testHasNodeAddress(t, addrs4, api.NodeInternalIP, "192.168.0.2")
+	testHasNodeAddress(t, addrs4, api.NodeExternalIP, "2.3.4.5")
 }
 
 func TestGetRegion(t *testing.T) {
@@ -626,4 +664,138 @@ func TestGetRegion(t *testing.T) {
 	if zone.FailureDomain != "us-west-2e" {
 		t.Errorf("Unexpected FailureDomain: %s", zone.FailureDomain)
 	}
+}
+
+func TestFindVPCID(t *testing.T) {
+	awsServices := NewFakeAWSServices()
+	c, err := newAWSCloud(strings.NewReader("[global]"), awsServices)
+	if err != nil {
+		t.Errorf("Error building aws cloud: %v", err)
+		return
+	}
+	vpcID, err := c.findVPCID()
+	if err != nil {
+		t.Errorf("Unexpected error:", err)
+	}
+	if vpcID != "vpc-mac0" {
+		t.Errorf("Unexpected vpcID: %s", vpcID)
+	}
+}
+
+func TestLoadBalancerMatchesClusterRegion(t *testing.T) {
+	awsServices := NewFakeAWSServices()
+	c, err := newAWSCloud(strings.NewReader("[global]"), awsServices)
+	if err != nil {
+		t.Errorf("Error building aws cloud: %v", err)
+		return
+	}
+
+	badELBRegion := "bad-elb-region"
+	errorMessage := fmt.Sprintf("requested load balancer region '%s' does not match cluster region '%s'", badELBRegion, c.region)
+
+	_, _, err = c.GetTCPLoadBalancer("elb-name", badELBRegion)
+	if err == nil || err.Error() != errorMessage {
+		t.Errorf("Expected GetTCPLoadBalancer region mismatch error.")
+	}
+
+	_, err = c.EnsureTCPLoadBalancer("elb-name", badELBRegion, nil, nil, nil, api.ServiceAffinityNone)
+	if err == nil || err.Error() != errorMessage {
+		t.Errorf("Expected EnsureTCPLoadBalancer region mismatch error.")
+	}
+
+	err = c.EnsureTCPLoadBalancerDeleted("elb-name", badELBRegion)
+	if err == nil || err.Error() != errorMessage {
+		t.Errorf("Expected EnsureTCPLoadBalancerDeleted region mismatch error.")
+	}
+
+	err = c.UpdateTCPLoadBalancer("elb-name", badELBRegion, nil)
+	if err == nil || err.Error() != errorMessage {
+		t.Errorf("Expected UpdateTCPLoadBalancer region mismatch error.")
+	}
+}
+
+func constructSubnets(subnetsIn map[int]map[string]string) (subnetsOut []*ec2.Subnet) {
+	for i := range subnetsIn {
+		subnetsOut = append(
+			subnetsOut,
+			constructSubnet(
+				subnetsIn[i]["id"],
+				subnetsIn[i]["az"],
+			),
+		)
+	}
+	return
+}
+
+func constructSubnet(id string, az string) *ec2.Subnet {
+	return &ec2.Subnet{
+		SubnetId:         &id,
+		AvailabilityZone: &az,
+	}
+}
+
+func TestSubnetIDsinVPC(t *testing.T) {
+	awsServices := NewFakeAWSServices()
+	c, err := newAWSCloud(strings.NewReader("[global]"), awsServices)
+	if err != nil {
+		t.Errorf("Error building aws cloud: %v", err)
+		return
+	}
+
+	vpcID := "vpc-deadbeef"
+
+	// test with 3 subnets from 3 different AZs
+	subnets := make(map[int]map[string]string)
+	subnets[0] = make(map[string]string)
+	subnets[0]["id"] = "subnet-a0000001"
+	subnets[0]["az"] = "af-south-1a"
+	subnets[1] = make(map[string]string)
+	subnets[1]["id"] = "subnet-b0000001"
+	subnets[1]["az"] = "af-south-1b"
+	subnets[2] = make(map[string]string)
+	subnets[2]["id"] = "subnet-c0000001"
+	subnets[2]["az"] = "af-south-1c"
+	awsServices.ec2.Subnets = constructSubnets(subnets)
+
+	result, err := c.listSubnetIDsinVPC(vpcID)
+	if err != nil {
+		t.Errorf("Error listing subnets: %v", err)
+		return
+	}
+
+	if len(result) != 3 {
+		t.Errorf("Expected 3 subnets but got %d", len(result))
+		return
+	}
+
+	result_set := make(map[string]bool)
+	for _, v := range result {
+		result_set[v] = true
+	}
+
+	for i := range subnets {
+		if !result_set[subnets[i]["id"]] {
+			t.Errorf("Expected subnet%d '%s' in result: %v", i, subnets[i]["id"], result)
+			return
+		}
+	}
+
+	// test with 4 subnets from 3 different AZs
+	// add duplicate az subnet
+	subnets[3] = make(map[string]string)
+	subnets[3]["id"] = "subnet-c0000002"
+	subnets[3]["az"] = "af-south-1c"
+	awsServices.ec2.Subnets = constructSubnets(subnets)
+
+	result, err = c.listSubnetIDsinVPC(vpcID)
+	if err != nil {
+		t.Errorf("Error listing subnets: %v", err)
+		return
+	}
+
+	if len(result) != 3 {
+		t.Errorf("Expected 3 subnets but got %d", len(result))
+		return
+	}
+
 }

@@ -17,24 +17,30 @@ limitations under the License.
 package openstack
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
-	"code.google.com/p/gcfg"
 	"github.com/rackspace/gophercloud"
 	"github.com/rackspace/gophercloud/openstack"
+	"github.com/rackspace/gophercloud/openstack/blockstorage/v1/volumes"
+	"github.com/rackspace/gophercloud/openstack/compute/v2/extensions/volumeattach"
 	"github.com/rackspace/gophercloud/openstack/compute/v2/flavors"
 	"github.com/rackspace/gophercloud/openstack/compute/v2/servers"
+	"github.com/rackspace/gophercloud/openstack/networking/v2/extensions/layer3/floatingips"
 	"github.com/rackspace/gophercloud/openstack/networking/v2/extensions/lbaas/members"
 	"github.com/rackspace/gophercloud/openstack/networking/v2/extensions/lbaas/monitors"
 	"github.com/rackspace/gophercloud/openstack/networking/v2/extensions/lbaas/pools"
 	"github.com/rackspace/gophercloud/openstack/networking/v2/extensions/lbaas/vips"
 	"github.com/rackspace/gophercloud/pagination"
+	"github.com/scalingdata/gcfg"
 
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api"
@@ -43,6 +49,12 @@ import (
 )
 
 const ProviderName = "openstack"
+
+// metadataUrl is URL to OpenStack metadata server. It's hadrcoded IPv4
+// link-local address as documented in "OpenStack Cloud Administrator Guide",
+// chapter Compute - Networking with nova-network.
+// http://docs.openstack.org/admin-guide-cloud/compute-networking-nova.html#metadata-service
+const metadataUrl = "http://169.254.169.254/openstack/2012-08-10/meta_data.json"
 
 var ErrNotFound = errors.New("Failed to find object")
 var ErrMultipleResults = errors.New("Multiple results where only one expected")
@@ -70,6 +82,7 @@ func (d *MyDuration) UnmarshalText(text []byte) error {
 
 type LoadBalancerOpts struct {
 	SubnetId          string     `gcfg:"subnet-id"` // required
+	FloatingNetworkId string     `gcfg:"floating-network-id"`
 	LBMethod          string     `gfcg:"lb-method"`
 	CreateMonitor     bool       `gcfg:"create-monitor"`
 	MonitorDelay      MyDuration `gcfg:"monitor-delay"`
@@ -82,6 +95,8 @@ type OpenStack struct {
 	provider *gophercloud.ProviderClient
 	region   string
 	lbOpts   LoadBalancerOpts
+	// InstanceID of the server where this OpenStack object is instantiated.
+	localInstanceID string
 }
 
 type Config struct {
@@ -119,6 +134,8 @@ func (cfg Config) toAuthOptions() gophercloud.AuthOptions {
 		APIKey:           cfg.Global.ApiKey,
 		TenantID:         cfg.Global.TenantId,
 		TenantName:       cfg.Global.TenantName,
+		DomainID:         cfg.Global.DomainId,
+		DomainName:       cfg.Global.DomainName,
 
 		// Persistent service, so we need to be able to renew tokens.
 		AllowReauth: true,
@@ -136,17 +153,89 @@ func readConfig(config io.Reader) (Config, error) {
 	return cfg, err
 }
 
+// parseMetadataUUID reads JSON from OpenStack metadata server and parses
+// instance ID out of it.
+func parseMetadataUUID(jsonData []byte) (string, error) {
+	// We should receive an object with { 'uuid': '<uuid>' } and couple of other
+	// properties (which we ignore).
+
+	obj := struct{ UUID string }{}
+	err := json.Unmarshal(jsonData, &obj)
+	if err != nil {
+		return "", err
+	}
+
+	uuid := obj.UUID
+	if uuid == "" {
+		err = fmt.Errorf("cannot parse OpenStack metadata, got empty uuid")
+		return "", err
+	}
+
+	return uuid, nil
+}
+
+func readInstanceID() (string, error) {
+	// Try to find instance ID on the local filesystem (created by cloud-init)
+	const instanceIDFile = "/var/lib/cloud/data/instance-id"
+	idBytes, err := ioutil.ReadFile(instanceIDFile)
+	if err == nil {
+		instanceID := string(idBytes)
+		instanceID = strings.TrimSpace(instanceID)
+		glog.V(3).Infof("Got instance id from %s: %s", instanceIDFile, instanceID)
+		if instanceID != "" {
+			return instanceID, nil
+		}
+		// Fall through with empty instanceID and try metadata server.
+	}
+	glog.V(5).Infof("Cannot read %s: '%v', trying metadata server", instanceIDFile, err)
+
+	// Try to get JSON from metdata server.
+	resp, err := http.Get(metadataUrl)
+	if err != nil {
+		glog.V(3).Infof("Cannot read %s: %v", metadataUrl, err)
+		return "", err
+	}
+
+	if resp.StatusCode != 200 {
+		err = fmt.Errorf("got unexpected status code when reading metadata from %s: %s", metadataUrl, resp.Status)
+		glog.V(3).Infof("%v", err)
+		return "", err
+	}
+
+	defer resp.Body.Close()
+	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		glog.V(3).Infof("Cannot get HTTP response body from %s: %v", metadataUrl, err)
+		return "", err
+	}
+	instanceID, err := parseMetadataUUID(bodyBytes)
+	if err != nil {
+		glog.V(3).Infof("Cannot parse instance ID from metadata from %s: %v", metadataUrl, err)
+		return "", err
+	}
+
+	glog.V(3).Infof("Got instance id from %s: %s", metadataUrl, instanceID)
+	return instanceID, nil
+}
+
 func newOpenStack(cfg Config) (*OpenStack, error) {
 	provider, err := openstack.AuthenticatedClient(cfg.toAuthOptions())
 	if err != nil {
 		return nil, err
 	}
 
-	os := OpenStack{
-		provider: provider,
-		region:   cfg.Global.Region,
-		lbOpts:   cfg.LoadBalancer,
+	id, err := readInstanceID()
+	if err != nil {
+		return nil, err
 	}
+
+	os := OpenStack{
+		provider:        provider,
+		region:          cfg.Global.Region,
+		lbOpts:          cfg.LoadBalancer,
+		localInstanceID: id,
+	}
+
 	return &os, nil
 }
 
@@ -395,6 +484,11 @@ func (os *OpenStack) ProviderName() string {
 	return ProviderName
 }
 
+// ScrubDNS filters DNS settings for pods.
+func (os *OpenStack) ScrubDNS(nameservers, searches []string) (nsOut, srchOut []string) {
+	return nameservers, searches
+}
+
 type LoadBalancer struct {
 	network *gophercloud.ServiceClient
 	compute *gophercloud.ServiceClient
@@ -501,6 +595,41 @@ func getVipByName(client *gophercloud.ServiceClient, name string) (*vips.Virtual
 	return &vipList[0], nil
 }
 
+func getFloatingIPByPortID(client *gophercloud.ServiceClient, portID string) (*floatingips.FloatingIP, error) {
+	opts := floatingips.ListOpts{
+		PortID: portID,
+	}
+	pager := floatingips.List(client, opts)
+
+	floatingIPList := make([]floatingips.FloatingIP, 0, 1)
+
+	err := pager.EachPage(func(page pagination.Page) (bool, error) {
+		f, err := floatingips.ExtractFloatingIPs(page)
+		if err != nil {
+			return false, err
+		}
+		floatingIPList = append(floatingIPList, f...)
+		if len(floatingIPList) > 1 {
+			return false, ErrMultipleResults
+		}
+		return true, nil
+	})
+	if err != nil {
+		if isNotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	if len(floatingIPList) == 0 {
+		return nil, ErrNotFound
+	} else if len(floatingIPList) > 1 {
+		return nil, ErrMultipleResults
+	}
+
+	return &floatingIPList[0], nil
+}
+
 func (lb *LoadBalancer) GetTCPLoadBalancer(name, region string) (*api.LoadBalancerStatus, bool, error) {
 	vip, err := getVipByName(lb.network, name)
 	if err == ErrNotFound {
@@ -521,8 +650,8 @@ func (lb *LoadBalancer) GetTCPLoadBalancer(name, region string) (*api.LoadBalanc
 // a list of regions (from config) and query/create loadbalancers in
 // each region.
 
-func (lb *LoadBalancer) EnsureTCPLoadBalancer(name, region string, externalIP net.IP, ports []*api.ServicePort, hosts []string, affinity api.ServiceAffinity) (*api.LoadBalancerStatus, error) {
-	glog.V(4).Infof("EnsureTCPLoadBalancer(%v, %v, %v, %v, %v, %v)", name, region, externalIP, ports, hosts, affinity)
+func (lb *LoadBalancer) EnsureTCPLoadBalancer(name, region string, loadBalancerIP net.IP, ports []*api.ServicePort, hosts []string, affinity api.ServiceAffinity) (*api.LoadBalancerStatus, error) {
+	glog.V(4).Infof("EnsureTCPLoadBalancer(%v, %v, %v, %v, %v, %v)", name, region, loadBalancerIP, ports, hosts, affinity)
 
 	if len(ports) > 1 {
 		return nil, fmt.Errorf("multiple ports are not yet supported in openstack load balancers")
@@ -614,8 +743,8 @@ func (lb *LoadBalancer) EnsureTCPLoadBalancer(name, region string, externalIP ne
 		SubnetID:     lb.opts.SubnetId,
 		Persistence:  persistence,
 	}
-	if externalIP != nil {
-		createOpts.Address = externalIP.String()
+	if loadBalancerIP != nil {
+		createOpts.Address = loadBalancerIP.String()
 	}
 
 	vip, err := vips.Create(lb.network, createOpts).Extract()
@@ -628,9 +757,24 @@ func (lb *LoadBalancer) EnsureTCPLoadBalancer(name, region string, externalIP ne
 	}
 
 	status := &api.LoadBalancerStatus{}
+
 	status.Ingress = []api.LoadBalancerIngress{{IP: vip.Address}}
 
+	if lb.opts.FloatingNetworkId != "" {
+		floatIPOpts := floatingips.CreateOpts{
+			FloatingNetworkID: lb.opts.FloatingNetworkId,
+			PortID:            vip.PortID,
+		}
+		floatIP, err := floatingips.Create(lb.network, floatIPOpts).Extract()
+		if err != nil {
+			return nil, err
+		}
+
+		status.Ingress = append(status.Ingress, api.LoadBalancerIngress{IP: floatIP.FloatingIP})
+	}
+
 	return status, nil
+
 }
 
 func (lb *LoadBalancer) UpdateTCPLoadBalancer(name, region string, hosts []string) error {
@@ -702,6 +846,19 @@ func (lb *LoadBalancer) EnsureTCPLoadBalancerDeleted(name, region string) error 
 		return err
 	}
 
+	if lb.opts.FloatingNetworkId != "" && vip != nil {
+		floatingIP, err := getFloatingIPByPortID(lb.network, vip.PortID)
+		if err != nil && !isNotFound(err) {
+			return err
+		}
+		if floatingIP != nil {
+			err = floatingips.Delete(lb.network, floatingIP.ID).ExtractErr()
+			if err != nil && !isNotFound(err) {
+				return err
+			}
+		}
+	}
+
 	// We have to delete the VIP before the pool can be deleted,
 	// so no point continuing if this fails.
 	if vip != nil {
@@ -762,4 +919,107 @@ func (os *OpenStack) GetZone() (cloudprovider.Zone, error) {
 
 func (os *OpenStack) Routes() (cloudprovider.Routes, bool) {
 	return nil, false
+}
+
+// Attaches given cinder volume to the compute running kubelet
+func (os *OpenStack) AttachDisk(diskName string) (string, error) {
+	disk, err := os.getVolume(diskName)
+	if err != nil {
+		return "", err
+	}
+	cClient, err := openstack.NewComputeV2(os.provider, gophercloud.EndpointOpts{
+		Region: os.region,
+	})
+	if err != nil || cClient == nil {
+		glog.Errorf("Unable to initialize nova client for region: %s", os.region)
+		return "", err
+	}
+
+	if len(disk.Attachments) > 0 && disk.Attachments[0]["server_id"] != nil {
+		if os.localInstanceID == disk.Attachments[0]["server_id"] {
+			glog.V(4).Infof("Disk: %q is already attached to compute: %q", diskName, os.localInstanceID)
+			return disk.ID, nil
+		} else {
+			errMsg := fmt.Sprintf("Disk %q is attached to a different compute: %q, should be detached before proceeding", diskName, disk.Attachments[0]["server_id"])
+			glog.Errorf(errMsg)
+			return "", errors.New(errMsg)
+		}
+	}
+	// add read only flag here if possible spothanis
+	_, err = volumeattach.Create(cClient, os.localInstanceID, &volumeattach.CreateOpts{
+		VolumeID: disk.ID,
+	}).Extract()
+	if err != nil {
+		glog.Errorf("Failed to attach %s volume to %s compute", diskName, os.localInstanceID)
+		return "", err
+	}
+	glog.V(2).Infof("Successfully attached %s volume to %s compute", diskName, os.localInstanceID)
+	return disk.ID, nil
+}
+
+// Detaches given cinder volume from the compute running kubelet
+func (os *OpenStack) DetachDisk(partialDiskId string) error {
+	disk, err := os.getVolume(partialDiskId)
+	if err != nil {
+		return err
+	}
+	cClient, err := openstack.NewComputeV2(os.provider, gophercloud.EndpointOpts{
+		Region: os.region,
+	})
+	if err != nil || cClient == nil {
+		glog.Errorf("Unable to initialize nova client for region: %s", os.region)
+		return err
+	}
+	if len(disk.Attachments) > 0 && disk.Attachments[0]["server_id"] != nil && os.localInstanceID == disk.Attachments[0]["server_id"] {
+		// This is a blocking call and effects kubelet's performance directly.
+		// We should consider kicking it out into a separate routine, if it is bad.
+		err = volumeattach.Delete(cClient, os.localInstanceID, disk.ID).ExtractErr()
+		if err != nil {
+			glog.Errorf("Failed to delete volume %s from compute %s attached %v", disk.ID, os.localInstanceID, err)
+			return err
+		}
+		glog.V(2).Infof("Successfully detached volume: %s from compute: %s", disk.ID, os.localInstanceID)
+	} else {
+		errMsg := fmt.Sprintf("Disk: %s has no attachments or is not attached to compute: %s", disk.Name, os.localInstanceID)
+		glog.Errorf(errMsg)
+		return errors.New(errMsg)
+	}
+	return nil
+}
+
+// Takes a partial/full disk id or diskname
+func (os *OpenStack) getVolume(diskName string) (volumes.Volume, error) {
+	sClient, err := openstack.NewBlockStorageV1(os.provider, gophercloud.EndpointOpts{
+		Region: os.region,
+	})
+
+	var volume volumes.Volume
+	if err != nil || sClient == nil {
+		glog.Errorf("Unable to initialize cinder client for region: %s", os.region)
+		return volume, err
+	}
+
+	err = volumes.List(sClient, nil).EachPage(func(page pagination.Page) (bool, error) {
+		vols, err := volumes.ExtractVolumes(page)
+		if err != nil {
+			glog.Errorf("Failed to extract volumes: %v", err)
+			return false, err
+		} else {
+			for _, v := range vols {
+				glog.V(4).Infof("%s %s %v", v.ID, v.Name, v.Attachments)
+				if v.Name == diskName || strings.Contains(v.ID, diskName) {
+					volume = v
+					return true, nil
+				}
+			}
+		}
+		// if it reached here then no disk with the given name was found.
+		errmsg := fmt.Sprintf("Unable to find disk: %s in region %s", diskName, os.region)
+		return false, errors.New(errmsg)
+	})
+	if err != nil {
+		glog.Errorf("Error occured getting volume: %s", diskName)
+		return volume, err
+	}
+	return volume, err
 }

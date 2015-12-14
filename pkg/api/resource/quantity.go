@@ -83,6 +83,11 @@ import (
 // This format is intended to make it difficult to use these numbers without
 // writing some sort of special handling code in the hopes that that will
 // cause implementors to also use a fixed point implementation.
+//
+// +protobuf=true
+// +protobuf.embed=QuantityProto
+// +protobuf.options.marshal=false
+// +protobuf.options.(gogoproto.goproto_stringer)=false
 type Quantity struct {
 	// Amount is public, so you can manipulate it if the accessor
 	// functions are not sufficient.
@@ -301,11 +306,37 @@ func (q *Quantity) String() string {
 	return number + string(suffix)
 }
 
+// Cmp compares q and y and returns:
+//
+//   -1 if q <  y
+//    0 if q == y
+//   +1 if q >  y
+//
+func (q *Quantity) Cmp(y Quantity) int {
+	num1 := q.Value()
+	num2 := y.Value()
+	if num1 < MaxMilliValue && num2 < MaxMilliValue {
+		num1 = q.MilliValue()
+		num2 = y.MilliValue()
+	}
+	if num1 < num2 {
+		return -1
+	} else if num1 > num2 {
+		return 1
+	}
+	return 0
+}
+
 func (q *Quantity) Add(y Quantity) error {
+	q.Amount.Add(q.Amount, y.Amount)
+	return nil
+}
+
+func (q *Quantity) Sub(y Quantity) error {
 	if q.Format != y.Format {
 		return fmt.Errorf("format mismatch: %v vs. %v", q.Format, y.Format)
 	}
-	q.Amount.Add(q.Amount, y.Amount)
+	q.Amount.Sub(q.Amount, y.Amount)
 	return nil
 }
 
@@ -351,8 +382,7 @@ func (q *Quantity) Value() int64 {
 	if q.Amount == nil {
 		return 0
 	}
-	tmp := &inf.Dec{}
-	return tmp.Round(q.Amount, 0, inf.RoundUp).UnscaledBig().Int64()
+	return scaledValue(q.Amount.UnscaledBig(), int(q.Amount.Scale()), 0)
 }
 
 // MilliValue returns the value of q * 1000; this could overflow an int64;
@@ -361,8 +391,7 @@ func (q *Quantity) MilliValue() int64 {
 	if q.Amount == nil {
 		return 0
 	}
-	tmp := &inf.Dec{}
-	return tmp.Round(tmp.Mul(q.Amount, decThousand), 0, inf.RoundUp).UnscaledBig().Int64()
+	return scaledValue(q.Amount.UnscaledBig(), int(q.Amount.Scale()), 3)
 }
 
 // Set sets q's value to be value.

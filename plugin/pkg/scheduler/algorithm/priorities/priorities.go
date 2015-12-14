@@ -25,6 +25,7 @@ import (
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm/predicates"
+	schedulerapi "k8s.io/kubernetes/plugin/pkg/scheduler/api"
 )
 
 // the unused capacity is calculated on a scale of 0-10
@@ -34,7 +35,7 @@ func calculateScore(requested int64, capacity int64, node string) int {
 		return 0
 	}
 	if requested > capacity {
-		glog.Infof("Combined requested resources %d from existing pods exceeds capacity %d on node %s",
+		glog.V(2).Infof("Combined requested resources %d from existing pods exceeds capacity %d on node %s",
 			requested, capacity, node)
 		return 0
 	}
@@ -73,7 +74,7 @@ func getNonzeroRequests(requests *api.ResourceList) (int64, int64) {
 
 // Calculate the resource occupancy on a node.  'node' has information about the resources on the node.
 // 'pods' is a list of pods currently scheduled on the node.
-func calculateResourceOccupancy(pod *api.Pod, node api.Node, pods []*api.Pod) algorithm.HostPriority {
+func calculateResourceOccupancy(pod *api.Pod, node api.Node, pods []*api.Pod) schedulerapi.HostPriority {
 	totalMilliCPU := int64(0)
 	totalMemory := int64(0)
 	capacityMilliCPU := node.Status.Capacity.Cpu().MilliValue()
@@ -87,7 +88,7 @@ func calculateResourceOccupancy(pod *api.Pod, node api.Node, pods []*api.Pod) al
 		}
 	}
 	// Add the resources requested by the current pod being scheduled.
-	// This also helps differentiate between differently sized, but empty, minions.
+	// This also helps differentiate between differently sized, but empty, nodes.
 	for _, container := range pod.Spec.Containers {
 		cpu, memory := getNonzeroRequests(&container.Resources.Requests)
 		totalMilliCPU += cpu
@@ -104,7 +105,7 @@ func calculateResourceOccupancy(pod *api.Pod, node api.Node, pods []*api.Pod) al
 		cpuScore, memoryScore,
 	)
 
-	return algorithm.HostPriority{
+	return schedulerapi.HostPriority{
 		Host:  node.Name,
 		Score: int((cpuScore + memoryScore) / 2),
 	}
@@ -114,14 +115,14 @@ func calculateResourceOccupancy(pod *api.Pod, node api.Node, pods []*api.Pod) al
 // It calculates the percentage of memory and CPU requested by pods scheduled on the node, and prioritizes
 // based on the minimum of the average of the fraction of requested to capacity.
 // Details: cpu((capacity - sum(requested)) * 10 / capacity) + memory((capacity - sum(requested)) * 10 / capacity) / 2
-func LeastRequestedPriority(pod *api.Pod, podLister algorithm.PodLister, minionLister algorithm.MinionLister) (algorithm.HostPriorityList, error) {
-	nodes, err := minionLister.List()
+func LeastRequestedPriority(pod *api.Pod, podLister algorithm.PodLister, nodeLister algorithm.NodeLister) (schedulerapi.HostPriorityList, error) {
+	nodes, err := nodeLister.List()
 	if err != nil {
-		return algorithm.HostPriorityList{}, err
+		return schedulerapi.HostPriorityList{}, err
 	}
 	podsToMachines, err := predicates.MapPodsToMachines(podLister)
 
-	list := algorithm.HostPriorityList{}
+	list := schedulerapi.HostPriorityList{}
 	for _, node := range nodes.Items {
 		list = append(list, calculateResourceOccupancy(pod, node, podsToMachines[node.Name]))
 	}
@@ -141,32 +142,32 @@ func NewNodeLabelPriority(label string, presence bool) algorithm.PriorityFunctio
 	return labelPrioritizer.CalculateNodeLabelPriority
 }
 
-// CalculateNodeLabelPriority checks whether a particular label exists on a minion or not, regardless of its value.
-// If presence is true, prioritizes minions that have the specified label, regardless of value.
-// If presence is false, prioritizes minions that do not have the specified label.
-func (n *NodeLabelPrioritizer) CalculateNodeLabelPriority(pod *api.Pod, podLister algorithm.PodLister, minionLister algorithm.MinionLister) (algorithm.HostPriorityList, error) {
+// CalculateNodeLabelPriority checks whether a particular label exists on a node or not, regardless of its value.
+// If presence is true, prioritizes nodes that have the specified label, regardless of value.
+// If presence is false, prioritizes nodes that do not have the specified label.
+func (n *NodeLabelPrioritizer) CalculateNodeLabelPriority(pod *api.Pod, podLister algorithm.PodLister, nodeLister algorithm.NodeLister) (schedulerapi.HostPriorityList, error) {
 	var score int
-	minions, err := minionLister.List()
+	nodes, err := nodeLister.List()
 	if err != nil {
 		return nil, err
 	}
 
-	labeledMinions := map[string]bool{}
-	for _, minion := range minions.Items {
-		exists := labels.Set(minion.Labels).Has(n.label)
-		labeledMinions[minion.Name] = (exists && n.presence) || (!exists && !n.presence)
+	labeledNodes := map[string]bool{}
+	for _, node := range nodes.Items {
+		exists := labels.Set(node.Labels).Has(n.label)
+		labeledNodes[node.Name] = (exists && n.presence) || (!exists && !n.presence)
 	}
 
-	result := []algorithm.HostPriority{}
+	result := []schedulerapi.HostPriority{}
 	//score int - scale of 0-10
 	// 0 being the lowest priority and 10 being the highest
-	for minionName, success := range labeledMinions {
+	for nodeName, success := range labeledNodes {
 		if success {
 			score = 10
 		} else {
 			score = 0
 		}
-		result = append(result, algorithm.HostPriority{Host: minionName, Score: score})
+		result = append(result, schedulerapi.HostPriority{Host: nodeName, Score: score})
 	}
 	return result, nil
 }
@@ -177,21 +178,21 @@ func (n *NodeLabelPrioritizer) CalculateNodeLabelPriority(pod *api.Pod, podListe
 // close the two metrics are to each other.
 // Detail: score = 10 - abs(cpuFraction-memoryFraction)*10. The algorithm is partly inspired by:
 // "Wei Huang et al. An Energy Efficient Virtual Machine Placement Algorithm with Balanced Resource Utilization"
-func BalancedResourceAllocation(pod *api.Pod, podLister algorithm.PodLister, minionLister algorithm.MinionLister) (algorithm.HostPriorityList, error) {
-	nodes, err := minionLister.List()
+func BalancedResourceAllocation(pod *api.Pod, podLister algorithm.PodLister, nodeLister algorithm.NodeLister) (schedulerapi.HostPriorityList, error) {
+	nodes, err := nodeLister.List()
 	if err != nil {
-		return algorithm.HostPriorityList{}, err
+		return schedulerapi.HostPriorityList{}, err
 	}
 	podsToMachines, err := predicates.MapPodsToMachines(podLister)
 
-	list := algorithm.HostPriorityList{}
+	list := schedulerapi.HostPriorityList{}
 	for _, node := range nodes.Items {
 		list = append(list, calculateBalancedResourceAllocation(pod, node, podsToMachines[node.Name]))
 	}
 	return list, nil
 }
 
-func calculateBalancedResourceAllocation(pod *api.Pod, node api.Node, pods []*api.Pod) algorithm.HostPriority {
+func calculateBalancedResourceAllocation(pod *api.Pod, node api.Node, pods []*api.Pod) schedulerapi.HostPriority {
 	totalMilliCPU := int64(0)
 	totalMemory := int64(0)
 	score := int(0)
@@ -203,7 +204,7 @@ func calculateBalancedResourceAllocation(pod *api.Pod, node api.Node, pods []*ap
 		}
 	}
 	// Add the resources requested by the current pod being scheduled.
-	// This also helps differentiate between differently sized, but empty, minions.
+	// This also helps differentiate between differently sized, but empty, nodes.
 	for _, container := range pod.Spec.Containers {
 		cpu, memory := getNonzeroRequests(&container.Resources.Requests)
 		totalMilliCPU += cpu
@@ -234,7 +235,7 @@ func calculateBalancedResourceAllocation(pod *api.Pod, node api.Node, pods []*ap
 		score,
 	)
 
-	return algorithm.HostPriority{
+	return schedulerapi.HostPriority{
 		Host:  node.Name,
 		Score: score,
 	}

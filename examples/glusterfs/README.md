@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/examples/glusterfs/README.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/examples/glusterfs/README.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -74,6 +74,15 @@ $ kubectl get endpoints
 NAME                ENDPOINTS
 glusterfs-cluster   10.240.106.152:1,10.240.79.157:1
 ```
+
+We need also create a service for this endpoints, so that the endpoints will be persistented. We will add this service without a selector to tell Kubernetes we want to add its endpoints manually. You can see [glusterfs-service.json](glusterfs-service.json) for details.
+
+Use this command to create the service:
+
+```sh
+$ kubectl create -f examples/glusterfs/glusterfs-service.json
+```
+
 
 ### Create a POD
 

@@ -20,11 +20,39 @@ import (
 	"reflect"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
+	api "k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/runtime"
 )
 
+func encodeOrDie(obj runtime.Object) []byte {
+	data, err := api.Codec.Encode(obj)
+	if err != nil {
+		panic(err.Error())
+	}
+	return data
+}
+
 func TestSortingPrinter(t *testing.T) {
+	intPtr := func(val int32) *int32 { return &val }
+
+	a := &api.Pod{
+		ObjectMeta: api.ObjectMeta{
+			Name: "a",
+		},
+	}
+
+	b := &api.Pod{
+		ObjectMeta: api.ObjectMeta{
+			Name: "b",
+		},
+	}
+
+	c := &api.Pod{
+		ObjectMeta: api.ObjectMeta{
+			Name: "c",
+		},
+	}
+
 	tests := []struct {
 		obj   runtime.Object
 		sort  runtime.Object
@@ -71,7 +99,7 @@ func TestSortingPrinter(t *testing.T) {
 					},
 				},
 			},
-			field: "{.ObjectMeta.Name}",
+			field: "{.metadata.name}",
 		},
 		{
 			name: "reverse-order",
@@ -113,7 +141,7 @@ func TestSortingPrinter(t *testing.T) {
 					},
 				},
 			},
-			field: "{.ObjectMeta.Name}",
+			field: "{.metadata.name}",
 		},
 		{
 			name: "random-order-numbers",
@@ -121,17 +149,17 @@ func TestSortingPrinter(t *testing.T) {
 				Items: []api.ReplicationController{
 					{
 						Spec: api.ReplicationControllerSpec{
-							Replicas: 5,
+							Replicas: intPtr(5),
 						},
 					},
 					{
 						Spec: api.ReplicationControllerSpec{
-							Replicas: 1,
+							Replicas: intPtr(1),
 						},
 					},
 					{
 						Spec: api.ReplicationControllerSpec{
-							Replicas: 9,
+							Replicas: intPtr(9),
 						},
 					},
 				},
@@ -140,22 +168,58 @@ func TestSortingPrinter(t *testing.T) {
 				Items: []api.ReplicationController{
 					{
 						Spec: api.ReplicationControllerSpec{
-							Replicas: 1,
+							Replicas: intPtr(1),
 						},
 					},
 					{
 						Spec: api.ReplicationControllerSpec{
-							Replicas: 5,
+							Replicas: intPtr(5),
 						},
 					},
 					{
 						Spec: api.ReplicationControllerSpec{
-							Replicas: 9,
+							Replicas: intPtr(9),
 						},
 					},
 				},
 			},
-			field: "{.Spec.Replicas}",
+			field: "{.spec.replicas}",
+		},
+		{
+			name: "v1.List in order",
+			obj: &api.List{
+				Items: []runtime.RawExtension{
+					{RawJSON: encodeOrDie(a)},
+					{RawJSON: encodeOrDie(b)},
+					{RawJSON: encodeOrDie(c)},
+				},
+			},
+			sort: &api.List{
+				Items: []runtime.RawExtension{
+					{RawJSON: encodeOrDie(a)},
+					{RawJSON: encodeOrDie(b)},
+					{RawJSON: encodeOrDie(c)},
+				},
+			},
+			field: "{.metadata.name}",
+		},
+		{
+			name: "v1.List in reverse",
+			obj: &api.List{
+				Items: []runtime.RawExtension{
+					{RawJSON: encodeOrDie(c)},
+					{RawJSON: encodeOrDie(b)},
+					{RawJSON: encodeOrDie(a)},
+				},
+			},
+			sort: &api.List{
+				Items: []runtime.RawExtension{
+					{RawJSON: encodeOrDie(a)},
+					{RawJSON: encodeOrDie(b)},
+					{RawJSON: encodeOrDie(c)},
+				},
+			},
+			field: "{.metadata.name}",
 		},
 	}
 	for _, test := range tests {

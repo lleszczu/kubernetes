@@ -17,14 +17,22 @@ limitations under the License.
 package v1
 
 import (
-	"strings"
-
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/intstr"
+	"k8s.io/kubernetes/pkg/util/parsers"
 )
 
 func addDefaultingFuncs() {
 	api.Scheme.AddDefaultingFuncs(
+		func(obj *PodExecOptions) {
+			obj.Stdout = true
+			obj.Stderr = true
+		},
+		func(obj *PodAttachOptions) {
+			obj.Stdout = true
+			obj.Stderr = true
+		},
 		func(obj *ReplicationController) {
 			var labels map[string]string
 			if obj.Spec.Template != nil {
@@ -40,7 +48,7 @@ func addDefaultingFuncs() {
 				}
 			}
 			if obj.Spec.Replicas == nil {
-				obj.Spec.Replicas = new(int)
+				obj.Spec.Replicas = new(int32)
 				*obj.Spec.Replicas = 1
 			}
 		},
@@ -58,10 +66,10 @@ func addDefaultingFuncs() {
 		},
 		func(obj *Container) {
 			if obj.ImagePullPolicy == "" {
-				// TODO(dchen1107): Move ParseImageName code to pkg/util
-				parts := strings.Split(obj.Image, ":")
+				_, tag := parsers.ParseImageName(obj.Image)
 				// Check image tag
-				if parts[len(parts)-1] == "latest" {
+
+				if tag == "latest" {
 					obj.ImagePullPolicy = PullAlways
 				} else {
 					obj.ImagePullPolicy = PullIfNotPresent
@@ -83,8 +91,26 @@ func addDefaultingFuncs() {
 				if sp.Protocol == "" {
 					sp.Protocol = ProtocolTCP
 				}
-				if sp.TargetPort == util.NewIntOrStringFromInt(0) || sp.TargetPort == util.NewIntOrStringFromString("") {
-					sp.TargetPort = util.NewIntOrStringFromInt(sp.Port)
+				if sp.TargetPort == intstr.FromInt(0) || sp.TargetPort == intstr.FromString("") {
+					sp.TargetPort = intstr.FromInt(int(sp.Port))
+				}
+			}
+		},
+		func(obj *Pod) {
+			// If limits are specified, but requests are not, default requests to limits
+			// This is done here rather than a more specific defaulting pass on ResourceRequirements
+			// because we only want this defaulting semantic to take place on a Pod and not a PodTemplate
+			for i := range obj.Spec.Containers {
+				// set requests to limits if requests are not specified, but limits are
+				if obj.Spec.Containers[i].Resources.Limits != nil {
+					if obj.Spec.Containers[i].Resources.Requests == nil {
+						obj.Spec.Containers[i].Resources.Requests = make(ResourceList)
+					}
+					for key, value := range obj.Spec.Containers[i].Resources.Limits {
+						if _, exists := obj.Spec.Containers[i].Resources.Requests[key]; !exists {
+							obj.Spec.Containers[i].Resources.Requests[key] = *(value.Copy())
+						}
+					}
 				}
 			}
 		},
@@ -98,6 +124,9 @@ func addDefaultingFuncs() {
 			if obj.HostNetwork {
 				defaultHostNetworkPorts(&obj.Containers)
 			}
+			if obj.SecurityContext == nil {
+				obj.SecurityContext = &PodSecurityContext{}
+			}
 			if obj.TerminationGracePeriodSeconds == nil {
 				period := int64(DefaultTerminationGracePeriodSeconds)
 				obj.TerminationGracePeriodSeconds = &period
@@ -106,6 +135,15 @@ func addDefaultingFuncs() {
 		func(obj *Probe) {
 			if obj.TimeoutSeconds == 0 {
 				obj.TimeoutSeconds = 1
+			}
+			if obj.PeriodSeconds == 0 {
+				obj.PeriodSeconds = 10
+			}
+			if obj.SuccessThreshold == 0 {
+				obj.SuccessThreshold = 1
+			}
+			if obj.FailureThreshold == 0 {
+				obj.FailureThreshold = 3
 			}
 		},
 		func(obj *Secret) {
@@ -124,6 +162,11 @@ func addDefaultingFuncs() {
 		func(obj *PersistentVolumeClaim) {
 			if obj.Status.Phase == "" {
 				obj.Status.Phase = ClaimPending
+			}
+		},
+		func(obj *ISCSIVolumeSource) {
+			if obj.ISCSIInterface == "" {
+				obj.ISCSIInterface = "default"
 			}
 		},
 		func(obj *Endpoints) {
@@ -158,19 +201,6 @@ func addDefaultingFuncs() {
 		func(obj *ObjectFieldSelector) {
 			if obj.APIVersion == "" {
 				obj.APIVersion = "v1"
-			}
-		},
-		func(obj *ResourceRequirements) {
-			// Set requests to limits if requests are not specified (but limits are).
-			if obj.Limits != nil {
-				if obj.Requests == nil {
-					obj.Requests = make(ResourceList)
-				}
-				for key, value := range obj.Limits {
-					if _, exists := obj.Requests[key]; !exists {
-						obj.Requests[key] = *(value.Copy())
-					}
-				}
 			}
 		},
 		func(obj *LimitRangeItem) {

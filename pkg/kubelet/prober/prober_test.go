@@ -17,12 +17,16 @@ limitations under the License.
 package prober
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/client/record"
+	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
+	"k8s.io/kubernetes/pkg/kubelet/prober/results"
 	"k8s.io/kubernetes/pkg/probe"
-	"k8s.io/kubernetes/pkg/util"
-	"k8s.io/kubernetes/pkg/util/exec"
+	"k8s.io/kubernetes/pkg/util/intstr"
 )
 
 func TestFormatURL(t *testing.T) {
@@ -72,14 +76,14 @@ func TestGetURLParts(t *testing.T) {
 		port  int
 		path  string
 	}{
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromInt(-1), Path: ""}, false, "", -1, ""},
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromString(""), Path: ""}, false, "", -1, ""},
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromString("-1"), Path: ""}, false, "", -1, ""},
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromString("not-found"), Path: ""}, false, "", -1, ""},
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromString("found"), Path: ""}, true, "127.0.0.1", 93, ""},
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromInt(76), Path: ""}, true, "127.0.0.1", 76, ""},
-		{&api.HTTPGetAction{Host: "", Port: util.NewIntOrStringFromString("118"), Path: ""}, true, "127.0.0.1", 118, ""},
-		{&api.HTTPGetAction{Host: "hostname", Port: util.NewIntOrStringFromInt(76), Path: "path"}, true, "hostname", 76, "path"},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromInt(-1), Path: ""}, false, "", -1, ""},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromString(""), Path: ""}, false, "", -1, ""},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromString("-1"), Path: ""}, false, "", -1, ""},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromString("not-found"), Path: ""}, false, "", -1, ""},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromString("found"), Path: ""}, true, "127.0.0.1", 93, ""},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromInt(76), Path: ""}, true, "127.0.0.1", 76, ""},
+		{&api.HTTPGetAction{Host: "", Port: intstr.FromString("118"), Path: ""}, true, "127.0.0.1", 118, ""},
+		{&api.HTTPGetAction{Host: "hostname", Port: intstr.FromInt(76), Path: "path"}, true, "hostname", 76, "path"},
 	}
 
 	for _, test := range testCases {
@@ -126,13 +130,13 @@ func TestGetTCPAddrParts(t *testing.T) {
 		host  string
 		port  int
 	}{
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromInt(-1)}, false, "", -1},
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromString("")}, false, "", -1},
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromString("-1")}, false, "", -1},
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromString("not-found")}, false, "", -1},
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromString("found")}, true, "1.2.3.4", 93},
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromInt(76)}, true, "1.2.3.4", 76},
-		{&api.TCPSocketAction{Port: util.NewIntOrStringFromString("118")}, true, "1.2.3.4", 118},
+		{&api.TCPSocketAction{Port: intstr.FromInt(-1)}, false, "", -1},
+		{&api.TCPSocketAction{Port: intstr.FromString("")}, false, "", -1},
+		{&api.TCPSocketAction{Port: intstr.FromString("-1")}, false, "", -1},
+		{&api.TCPSocketAction{Port: intstr.FromString("not-found")}, false, "", -1},
+		{&api.TCPSocketAction{Port: intstr.FromString("found")}, true, "1.2.3.4", 93},
+		{&api.TCPSocketAction{Port: intstr.FromInt(76)}, true, "1.2.3.4", 76},
+		{&api.TCPSocketAction{Port: intstr.FromString("118")}, true, "1.2.3.4", 118},
 	}
 
 	for _, test := range testCases {
@@ -160,11 +164,84 @@ func TestGetTCPAddrParts(t *testing.T) {
 	}
 }
 
-type FakeExecProber struct {
-	result probe.Result
-	err    error
-}
+func TestProbe(t *testing.T) {
+	prober := &prober{
+		refManager: kubecontainer.NewRefManager(),
+		recorder:   &record.FakeRecorder{},
+	}
+	containerID := kubecontainer.ContainerID{"test", "foobar"}
 
-func (p FakeExecProber) Probe(_ exec.Cmd) (probe.Result, error) {
-	return p.result, p.err
+	execProbe := &api.Probe{
+		Handler: api.Handler{
+			Exec: &api.ExecAction{},
+		},
+	}
+	tests := []struct {
+		probe          *api.Probe
+		execError      bool
+		expectError    bool
+		execResult     probe.Result
+		expectedResult results.Result
+	}{
+		{ // No probe
+			probe:          nil,
+			expectedResult: results.Success,
+		},
+		{ // No handler
+			probe:          &api.Probe{},
+			expectError:    true,
+			expectedResult: results.Failure,
+		},
+		{ // Probe fails
+			probe:          execProbe,
+			execResult:     probe.Failure,
+			expectedResult: results.Failure,
+		},
+		{ // Probe succeeds
+			probe:          execProbe,
+			execResult:     probe.Success,
+			expectedResult: results.Success,
+		},
+		{ // Probe result is unknown
+			probe:          execProbe,
+			execResult:     probe.Unknown,
+			expectedResult: results.Failure,
+		},
+		{ // Probe has an error
+			probe:          execProbe,
+			execError:      true,
+			expectError:    true,
+			execResult:     probe.Unknown,
+			expectedResult: results.Failure,
+		},
+	}
+
+	for i, test := range tests {
+		for _, probeType := range [...]probeType{liveness, readiness} {
+			testID := fmt.Sprintf("%d-%s", i, probeType)
+			testContainer := api.Container{}
+			switch probeType {
+			case liveness:
+				testContainer.LivenessProbe = test.probe
+			case readiness:
+				testContainer.ReadinessProbe = test.probe
+			}
+			if test.execError {
+				prober.exec = fakeExecProber{test.execResult, errors.New("exec error")}
+			} else {
+				prober.exec = fakeExecProber{test.execResult, nil}
+			}
+
+			result, err := prober.probe(probeType, &api.Pod{}, api.PodStatus{}, testContainer, containerID)
+			if test.expectError && err == nil {
+				t.Errorf("[%s] Expected probe error but no error was returned.", testID)
+			}
+			if !test.expectError && err != nil {
+				t.Errorf("[%s] Didn't expect probe error but got: %v", testID, err)
+			}
+			if test.expectedResult != result {
+				t.Errorf("[%s] Expected result to be %v but was %v", testID, test.expectedResult, result)
+			}
+		}
+	}
 }

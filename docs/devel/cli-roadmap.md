@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/devel/cli-roadmap.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/devel/cli-roadmap.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -34,9 +34,9 @@ Documentation for other releases can be found at
 # Kubernetes CLI/Configuration Roadmap
 
 See github issues with the following labels:
-* [area/app-config-deployment](https://github.com/GoogleCloudPlatform/kubernetes/labels/area/app-config-deployment)
-* [component/CLI](https://github.com/GoogleCloudPlatform/kubernetes/labels/component/CLI)
-* [component/client](https://github.com/GoogleCloudPlatform/kubernetes/labels/component/client)
+* [area/app-config-deployment](https://github.com/kubernetes/kubernetes/labels/area/app-config-deployment)
+* [component/kubectl](https://github.com/kubernetes/kubernetes/labels/component/kubectl)
+* [component/clientlib](https://github.com/kubernetes/kubernetes/labels/component/clientlib)
 
 
 <!-- BEGIN MUNGE: GENERATED_ANALYTICS -->

@@ -22,8 +22,9 @@ import (
 	"k8s.io/kubernetes/pkg/admission"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/client/unversioned/cache"
+	"k8s.io/kubernetes/pkg/client/cache"
 	"k8s.io/kubernetes/pkg/client/unversioned/testclient"
+	"k8s.io/kubernetes/pkg/runtime"
 )
 
 // TestAdmission verifies a namespace is created on create requests for namespace managed resources
@@ -41,7 +42,7 @@ func TestAdmission(t *testing.T) {
 			Containers: []api.Container{{Name: "ctr", Image: "image"}},
 		},
 	}
-	err := handler.Admit(admission.NewAttributesRecord(&pod, "Pod", pod.Namespace, pod.Name, "pods", "", admission.Create, nil))
+	err := handler.Admit(admission.NewAttributesRecord(&pod, api.Kind("Pod"), pod.Namespace, pod.Name, api.Resource("pods"), "", admission.Create, nil))
 	if err != nil {
 		t.Errorf("Unexpected error returned from admission handler")
 	}
@@ -73,7 +74,7 @@ func TestAdmissionNamespaceExists(t *testing.T) {
 			Containers: []api.Container{{Name: "ctr", Image: "image"}},
 		},
 	}
-	err := handler.Admit(admission.NewAttributesRecord(&pod, "Pod", pod.Namespace, pod.Name, "pods", "", admission.Create, nil))
+	err := handler.Admit(admission.NewAttributesRecord(&pod, api.Kind("Pod"), pod.Namespace, pod.Name, api.Resource("pods"), "", admission.Create, nil))
 	if err != nil {
 		t.Errorf("Unexpected error returned from admission handler")
 	}
@@ -94,7 +95,7 @@ func TestIgnoreAdmission(t *testing.T) {
 			Containers: []api.Container{{Name: "ctr", Image: "image"}},
 		},
 	}
-	err := handler.Admit(admission.NewAttributesRecord(&pod, "Pod", pod.Namespace, pod.Name, "pods", "", admission.Update, nil))
+	err := handler.Admit(admission.NewAttributesRecord(&pod, api.Kind("Pod"), pod.Namespace, pod.Name, api.Resource("pods"), "", admission.Update, nil))
 	if err != nil {
 		t.Errorf("Unexpected error returned from admission handler")
 	}
@@ -107,7 +108,9 @@ func TestIgnoreAdmission(t *testing.T) {
 func TestAdmissionNamespaceExistsUnknownToHandler(t *testing.T) {
 	namespace := "test"
 	mockClient := &testclient.Fake{}
-	mockClient.SetErr(errors.NewAlreadyExists("namespaces", namespace))
+	mockClient.AddReactor("create", "namespaces", func(action testclient.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.NewAlreadyExists("namespaces", namespace)
+	})
 
 	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
 	handler := &provision{
@@ -121,7 +124,7 @@ func TestAdmissionNamespaceExistsUnknownToHandler(t *testing.T) {
 			Containers: []api.Container{{Name: "ctr", Image: "image"}},
 		},
 	}
-	err := handler.Admit(admission.NewAttributesRecord(&pod, "Pod", pod.Namespace, pod.Name, "pods", "", admission.Create, nil))
+	err := handler.Admit(admission.NewAttributesRecord(&pod, api.Kind("Pod"), pod.Namespace, pod.Name, api.Resource("pods"), "", admission.Create, nil))
 	if err != nil {
 		t.Errorf("Unexpected error returned from admission handler")
 	}

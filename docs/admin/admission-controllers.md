@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/admin/admission-controllers.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/admin/admission-controllers.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -43,11 +43,13 @@ Documentation for other releases can be found at
   - [What does each plug-in do?](#what-does-each-plug-in-do)
     - [AlwaysAdmit](#alwaysadmit)
     - [AlwaysDeny](#alwaysdeny)
-    - [DenyExecOnPrivileged](#denyexeconprivileged)
+    - [DenyExecOnPrivileged (deprecated)](#denyexeconprivileged-deprecated)
+    - [DenyEscalatingExec](#denyescalatingexec)
     - [ServiceAccount](#serviceaccount)
     - [SecurityContextDeny](#securitycontextdeny)
     - [ResourceQuota](#resourcequota)
     - [LimitRanger](#limitranger)
+    - [InitialResources (experimental)](#initialresources-experimental)
     - [NamespaceExists (deprecated)](#namespaceexists-deprecated)
     - [NamespaceAutoProvision (deprecated)](#namespaceautoprovision-deprecated)
     - [NamespaceLifecycle](#namespacelifecycle)
@@ -92,12 +94,24 @@ Use this plugin by itself to pass-through all requests.
 
 Rejects all requests.  Used for testing.
 
-### DenyExecOnPrivileged
+### DenyExecOnPrivileged (deprecated)
 
 This plug-in will intercept all requests to exec a command in a pod if that pod has a privileged container.
 
 If your cluster supports privileged containers, and you want to restrict the ability of end-users to exec
 commands in those containers, we strongly encourage enabling this plug-in.
+
+This functionality has been merged into [DenyEscalatingExec](#denyescalatingexec).
+
+### DenyEscalatingExec
+
+This plug-in will deny exec and attach commands to pods that run with escalated privileges that
+allow host access.  This includes pods that run as privileged, have access to the host IPC namespace, and
+have access to the host PID namespace.
+
+If your cluster supports containers that run with escalated privileges, and you want to
+restrict the ability of end-users to exec commands in those containers, we strongly encourage
+enabling this plug-in.
 
 ### ServiceAccount
 
@@ -114,7 +128,7 @@ This plug-in will observe the incoming request and ensure that it does not viola
 enumerated in the `ResourceQuota` object in a `Namespace`.  If you are using `ResourceQuota`
 objects in your Kubernetes deployment, you MUST use this plug-in to enforce quota constraints.
 
-See the [resourceQuota design doc](../design/admission_control_resource_quota.md) and the [example of Resource Quota](../user-guide/resourcequota/) for more details.
+See the [resourceQuota design doc](../design/admission_control_resource_quota.md) and the [example of Resource Quota](resourcequota/) for more details.
 
 It is strongly encouraged that this plug-in is configured last in the sequence of admission control plug-ins.  This is
 so that quota is not prematurely incremented only for the request to be rejected later in admission control.
@@ -128,6 +142,15 @@ be used to apply default resource requests to Pods that don't specify any; curre
 applies a 0.1 CPU requirement to all Pods in the `default` namespace.
 
 See the [limitRange design doc](../design/admission_control_limit_range.md) and the [example of Limit Range](limitrange/) for more details.
+
+### InitialResources (experimental)
+
+This plug-in observes pod creation requests. If a container omits compute resource requests and limits,
+then the plug-in auto-populates a compute resource request based on historical usage of containers running the same image.
+If there is not enough data to make a decision the Request is left unchanged.
+When the plug-in sets a compute resource request, it annotates the pod with information on what compute resources it auto-populated.
+
+See the [InitialResouces proposal](../proposals/initial-resources.md) for more details.
 
 ### NamespaceExists (deprecated)
 

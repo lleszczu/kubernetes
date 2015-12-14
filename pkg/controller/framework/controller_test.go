@@ -24,10 +24,10 @@ import (
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/unversioned/cache"
+	"k8s.io/kubernetes/pkg/client/cache"
 	"k8s.io/kubernetes/pkg/controller/framework"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/sets"
 
 	"github.com/google/gofuzz"
 )
@@ -104,7 +104,7 @@ func Example() {
 	}
 
 	// Let's wait for the controller to process the things we just added.
-	outputSet := util.StringSet{}
+	outputSet := sets.String{}
 	for i := 0; i < len(testIDs); i++ {
 		outputSet.Insert(<-deletionCounter)
 	}
@@ -161,7 +161,7 @@ func ExampleInformer() {
 	}
 
 	// Let's wait for the controller to process the things we just added.
-	outputSet := util.StringSet{}
+	outputSet := sets.String{}
 	for i := 0; i < len(testIDs); i++ {
 		outputSet.Insert(<-deletionCounter)
 	}
@@ -235,7 +235,7 @@ func TestHammerController(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			// Let's add a few objects to the source.
-			currentNames := util.StringSet{}
+			currentNames := sets.String{}
 			rs := rand.NewSource(rand.Int63())
 			f := fuzz.New().NilChance(.5).NumElements(0, 2).RandSource(rs)
 			r := rand.New(rs) // Mustn't use r and f concurrently!
@@ -311,7 +311,49 @@ func TestUpdate(t *testing.T) {
 		pair{FROM, FROM}: true,
 	}
 
+	pod := func(name, check string, final bool) *api.Pod {
+		p := &api.Pod{
+			ObjectMeta: api.ObjectMeta{
+				Name:   name,
+				Labels: map[string]string{"check": check},
+			},
+		}
+		if final {
+			p.Labels["final"] = "true"
+		}
+		return p
+	}
+	deletePod := func(p *api.Pod) bool {
+		return p.Labels["final"] == "true"
+	}
+
+	tests := []func(string){
+		func(name string) {
+			name = "a-" + name
+			source.Add(pod(name, FROM, false))
+			source.Modify(pod(name, TO, true))
+		},
+		func(name string) {
+			name = "b-" + name
+			source.Add(pod(name, FROM, false))
+			source.ModifyDropWatch(pod(name, TO, true))
+		},
+		func(name string) {
+			name = "c-" + name
+			source.AddDropWatch(pod(name, FROM, false))
+			source.Modify(pod(name, ADD_MISSED, false))
+			source.Modify(pod(name, TO, true))
+		},
+		func(name string) {
+			name = "d-" + name
+			source.Add(pod(name, FROM, true))
+		},
+	}
+
+	const threads = 3
+
 	var testDoneWG sync.WaitGroup
+	testDoneWG.Add(threads * len(tests))
 
 	// Make a controller that deletes things once it observes an update.
 	// It calls Done() on the wait group on deletions so we can tell when
@@ -327,7 +369,9 @@ func TestUpdate(t *testing.T) {
 				if !allowedTransitions[pair{from, to}] {
 					t.Errorf("observed transition %q -> %q for %v", from, to, n.Name)
 				}
-				source.Delete(n)
+				if deletePod(n) {
+					source.Delete(n)
+				}
 			},
 			DeleteFunc: func(obj interface{}) {
 				testDoneWG.Done()
@@ -336,46 +380,14 @@ func TestUpdate(t *testing.T) {
 	)
 
 	// Run the controller and run it until we close stop.
+	// Once Run() is called, calls to testDoneWG.Done() might start, so
+	// all testDoneWG.Add() calls must happen before this point
 	stop := make(chan struct{})
 	go controller.Run(stop)
 
-	pod := func(name, check string) *api.Pod {
-		return &api.Pod{
-			ObjectMeta: api.ObjectMeta{
-				Name:   name,
-				Labels: map[string]string{"check": check},
-			},
-		}
-	}
-
-	tests := []func(string){
-		func(name string) {
-			name = "a-" + name
-			source.Add(pod(name, FROM))
-			source.Modify(pod(name, TO))
-		},
-		func(name string) {
-			name = "b-" + name
-			source.Add(pod(name, FROM))
-			source.ModifyDropWatch(pod(name, TO))
-		},
-		func(name string) {
-			name = "c-" + name
-			source.AddDropWatch(pod(name, FROM))
-			source.Modify(pod(name, ADD_MISSED))
-			source.Modify(pod(name, TO))
-		},
-		func(name string) {
-			name = "d-" + name
-			source.Add(pod(name, FROM))
-		},
-	}
-
 	// run every test a few times, in parallel
-	const threads = 3
 	var wg sync.WaitGroup
 	wg.Add(threads * len(tests))
-	testDoneWG.Add(threads * len(tests))
 	for i := 0; i < threads; i++ {
 		for j, f := range tests {
 			go func(name string, f func(string)) {

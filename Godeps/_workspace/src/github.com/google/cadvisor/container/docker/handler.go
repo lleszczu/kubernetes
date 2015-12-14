@@ -25,7 +25,7 @@ import (
 	"github.com/docker/libcontainer/cgroups"
 	cgroup_fs "github.com/docker/libcontainer/cgroups/fs"
 	libcontainerConfigs "github.com/docker/libcontainer/configs"
-	"github.com/fsouza/go-dockerclient"
+	docker "github.com/fsouza/go-dockerclient"
 	"github.com/google/cadvisor/container"
 	containerLibcontainer "github.com/google/cadvisor/container/libcontainer"
 	"github.com/google/cadvisor/fs"
@@ -62,9 +62,9 @@ type dockerContainerHandler struct {
 	// Manager of this container's cgroups.
 	cgroupManager cgroups.Manager
 
-	usesAufsDriver bool
-	fsInfo         fs.FsInfo
-	storageDirs    []string
+	storageDriver storageDriver
+	fsInfo        fs.FsInfo
+	storageDirs   []string
 
 	// Time at which this container was created.
 	creationTime time.Time
@@ -74,6 +74,18 @@ type dockerContainerHandler struct {
 
 	// The container PID used to switch namespaces as required
 	pid int
+
+	// Image name used for this container.
+	image string
+
+	// The host root FS to read
+	rootFs string
+
+	// The network mode of the container
+	networkMode string
+
+	// Filesystem handler.
+	fsHandler fsHandler
 }
 
 func newDockerContainerHandler(
@@ -81,8 +93,9 @@ func newDockerContainerHandler(
 	name string,
 	machineInfoFactory info.MachineInfoFactory,
 	fsInfo fs.FsInfo,
-	usesAufsDriver bool,
+	storageDriver storageDriver,
 	cgroupSubsystems *containerLibcontainer.CgroupSubsystems,
+	inHostNamespace bool,
 ) (container.ContainerHandler, error) {
 	// Create the cgroup paths.
 	cgroupPaths := make(map[string]string, len(cgroupSubsystems.MountPoints))
@@ -98,7 +111,15 @@ func newDockerContainerHandler(
 		Paths: cgroupPaths,
 	}
 
+	rootFs := "/"
+	if !inHostNamespace {
+		rootFs = "/rootfs"
+	}
+
 	id := ContainerNameToDockerId(name)
+
+	storageDirs := []string{path.Join(*dockerRootDir, pathToAufsDir, id)}
+
 	handler := &dockerContainerHandler{
 		id:                 id,
 		client:             client,
@@ -106,10 +127,17 @@ func newDockerContainerHandler(
 		machineInfoFactory: machineInfoFactory,
 		cgroupPaths:        cgroupPaths,
 		cgroupManager:      cgroupManager,
-		usesAufsDriver:     usesAufsDriver,
+		storageDriver:      storageDriver,
 		fsInfo:             fsInfo,
+		rootFs:             rootFs,
+		storageDirs:        storageDirs,
+		fsHandler:          newFsHandler(time.Minute, storageDirs, fsInfo),
 	}
-	handler.storageDirs = append(handler.storageDirs, path.Join(*dockerRootDir, pathToAufsDir, id))
+
+	switch storageDriver {
+	case aufsStorageDriver:
+		handler.fsHandler.start()
+	}
 
 	// We assume that if Inspect fails then the container is not known to docker.
 	ctnr, err := client.InspectContainer(id)
@@ -120,11 +148,16 @@ func newDockerContainerHandler(
 	handler.pid = ctnr.State.Pid
 
 	// Add the name and bare ID as aliases of the container.
-	handler.aliases = append(handler.aliases, strings.TrimPrefix(ctnr.Name, "/"))
-	handler.aliases = append(handler.aliases, id)
+	handler.aliases = append(handler.aliases, strings.TrimPrefix(ctnr.Name, "/"), id)
 	handler.labels = ctnr.Config.Labels
+	handler.image = ctnr.Config.Image
+	handler.networkMode = ctnr.HostConfig.NetworkMode
 
 	return handler, nil
+}
+
+func (self *dockerContainerHandler) Cleanup() {
+	self.fsHandler.stop()
 }
 
 func (self *dockerContainerHandler) ContainerReference() (info.ContainerReference, error) {
@@ -171,28 +204,21 @@ func libcontainerConfigToContainerSpec(config *libcontainerConfigs.Config, mi *i
 	}
 	spec.Cpu.Mask = utils.FixCpuMask(config.Cgroups.CpusetCpus, mi.NumCores)
 
-	// Docker reports a loop device for containers with --net=host. Ignore
-	// those too.
-	networkCount := 0
-	for _, n := range config.Networks {
-		if n.Type != "loopback" {
-			networkCount += 1
-		}
-	}
-
-	spec.HasNetwork = networkCount > 0 || hasNetNs(config.Namespaces)
 	spec.HasDiskIo = true
 
 	return spec
 }
 
-func hasNetNs(namespaces libcontainerConfigs.Namespaces) bool {
-	for _, ns := range namespaces {
-		if ns.Type == libcontainerConfigs.NEWNET {
-			return true
-		}
+var (
+	hasNetworkModes = map[string]bool{
+		"host":    true,
+		"bridge":  true,
+		"default": true,
 	}
-	return false
+)
+
+func hasNet(networkMode string) bool {
+	return hasNetworkModes[networkMode]
 }
 
 func (self *dockerContainerHandler) GetSpec() (info.ContainerSpec, error) {
@@ -207,17 +233,18 @@ func (self *dockerContainerHandler) GetSpec() (info.ContainerSpec, error) {
 
 	spec := libcontainerConfigToContainerSpec(libcontainerConfig, mi)
 	spec.CreationTime = self.creationTime
-	if self.usesAufsDriver {
-		spec.HasFilesystem = true
-	}
+	// For now only enable for aufs filesystems
+	spec.HasFilesystem = self.storageDriver == aufsStorageDriver
 	spec.Labels = self.labels
+	spec.Image = self.image
+	spec.HasNetwork = hasNet(self.networkMode)
 
 	return spec, err
 }
 
 func (self *dockerContainerHandler) getFsStats(stats *info.ContainerStats) error {
 	// No support for non-aufs storage drivers.
-	if !self.usesAufsDriver {
+	if self.storageDriver != aufsStorageDriver {
 		return nil
 	}
 
@@ -243,16 +270,7 @@ func (self *dockerContainerHandler) getFsStats(stats *info.ContainerStats) error
 
 	fsStat := info.FsStats{Device: deviceInfo.Device, Limit: limit}
 
-	var usage uint64 = 0
-	for _, dir := range self.storageDirs {
-		// TODO(Vishh): Add support for external mounts.
-		dirUsage, err := self.fsInfo.GetDirUsage(dir)
-		if err != nil {
-			return err
-		}
-		usage += dirUsage
-	}
-	fsStat.Usage = usage
+	fsStat.Usage = self.fsHandler.usage()
 	stats.Filesystem = append(stats.Filesystem, fsStat)
 
 	return nil
@@ -260,32 +278,16 @@ func (self *dockerContainerHandler) getFsStats(stats *info.ContainerStats) error
 
 // TODO(vmarmol): Get from libcontainer API instead of cgroup manager when we don't have to support older Dockers.
 func (self *dockerContainerHandler) GetStats() (*info.ContainerStats, error) {
-	config, err := self.readLibcontainerConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	var networkInterfaces []string
-	if len(config.Networks) > 0 {
-		// ContainerStats only reports stat for one network device.
-		// TODO(vmarmol): Handle multiple physical network devices.
-		for _, n := range config.Networks {
-			// Take the first non-loopback.
-			if n.Type != "loopback" {
-				networkInterfaces = []string{n.HostInterfaceName}
-				break
-			}
-		}
-	}
-	stats, err := containerLibcontainer.GetStats(self.cgroupManager, networkInterfaces, self.pid)
+	stats, err := containerLibcontainer.GetStats(self.cgroupManager, self.rootFs, self.pid)
 	if err != nil {
 		return stats, err
 	}
-
-	// TODO(rjnagal): Remove the conversion when network stats are read from libcontainer.
-	convertInterfaceStats(&stats.Network.InterfaceStats)
-	for i := range stats.Network.Interfaces {
-		convertInterfaceStats(&stats.Network.Interfaces[i])
+	// Clean up stats for containers that don't have their own network - this
+	// includes containers running in Kubernetes pods that use the network of the
+	// infrastructure container. This stops metrics being reported multiple times
+	// for each container in a pod.
+	if !hasNet(self.networkMode) {
+		stats.Network = info.NetworkStats{}
 	}
 
 	// Get filesystem stats.
@@ -297,48 +299,9 @@ func (self *dockerContainerHandler) GetStats() (*info.ContainerStats, error) {
 	return stats, nil
 }
 
-func convertInterfaceStats(stats *info.InterfaceStats) {
-	net := *stats
-
-	// Ingress for host veth is from the container.
-	// Hence tx_bytes stat on the host veth is actually number of bytes received by the container.
-	stats.RxBytes = net.TxBytes
-	stats.RxPackets = net.TxPackets
-	stats.RxErrors = net.TxErrors
-	stats.RxDropped = net.TxDropped
-	stats.TxBytes = net.RxBytes
-	stats.TxPackets = net.RxPackets
-	stats.TxErrors = net.RxErrors
-	stats.TxDropped = net.RxDropped
-}
-
 func (self *dockerContainerHandler) ListContainers(listType container.ListType) ([]info.ContainerReference, error) {
-	if self.name != "/docker" {
-		return []info.ContainerReference{}, nil
-	}
-	opt := docker.ListContainersOptions{
-		All: true,
-	}
-	containers, err := self.client.ListContainers(opt)
-	if err != nil {
-		return nil, err
-	}
-
-	ret := make([]info.ContainerReference, 0, len(containers)+1)
-	for _, c := range containers {
-		if !strings.HasPrefix(c.Status, "Up ") {
-			continue
-		}
-
-		ref := info.ContainerReference{
-			Name:      FullContainerName(c.ID),
-			Aliases:   append(c.Names, c.ID),
-			Namespace: DockerNamespace,
-		}
-		ret = append(ret, ref)
-	}
-
-	return ret, nil
+	// No-op for Docker driver.
+	return []info.ContainerReference{}, nil
 }
 
 func (self *dockerContainerHandler) GetCgroupPath(resource string) (string, error) {
@@ -376,7 +339,7 @@ func (self *dockerContainerHandler) Exists() bool {
 }
 
 func DockerInfo() (map[string]string, error) {
-	client, err := docker.NewClient(*ArgDockerEndpoint)
+	client, err := Client()
 	if err != nil {
 		return nil, fmt.Errorf("unable to communicate with docker daemon: %v", err)
 	}
@@ -388,7 +351,7 @@ func DockerInfo() (map[string]string, error) {
 }
 
 func DockerImages() ([]docker.APIImages, error) {
-	client, err := docker.NewClient(*ArgDockerEndpoint)
+	client, err := Client()
 	if err != nil {
 		return nil, fmt.Errorf("unable to communicate with docker daemon: %v", err)
 	}

@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/getting-started-guides/binary_release.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/getting-started-guides/binary_release.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -37,7 +37,7 @@ You can either build a release from sources or download a pre-built release.  If
 
 ### Prebuilt Binary Release
 
-The list of binary releases is available for download from the [GitHub Kubernetes repo release page](https://github.com/GoogleCloudPlatform/kubernetes/releases).
+The list of binary releases is available for download from the [GitHub Kubernetes repo release page](https://github.com/kubernetes/kubernetes/releases).
 
 Download the latest release and unpack this tar file on Linux or OS X, cd to the created `kubernetes/` directory, and then follow the getting started guide for your cloud.
 
@@ -48,7 +48,7 @@ Get the Kubernetes source.  If you are simply building a release from source the
 Building a release is simple.
 
 ```bash
-git clone https://github.com/GoogleCloudPlatform/kubernetes.git
+git clone https://github.com/kubernetes/kubernetes.git
 cd kubernetes
 make release
 ```

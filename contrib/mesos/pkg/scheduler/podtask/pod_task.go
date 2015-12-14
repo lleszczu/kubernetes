@@ -17,6 +17,7 @@ limitations under the License.
 package podtask
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -26,9 +27,7 @@ import (
 	"k8s.io/kubernetes/contrib/mesos/pkg/offers"
 	annotation "k8s.io/kubernetes/contrib/mesos/pkg/scheduler/meta"
 	"k8s.io/kubernetes/contrib/mesos/pkg/scheduler/metrics"
-	mresource "k8s.io/kubernetes/contrib/mesos/pkg/scheduler/resource"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/labels"
 
 	log "github.com/golang/glog"
 	mesos "github.com/mesos/mesos-go/mesosproto"
@@ -52,33 +51,44 @@ const (
 	Deleted  = FlagType("deleted")
 )
 
+var defaultRoles = []string{"*"}
+
 // A struct that describes a pod task.
 type T struct {
-	ID          string
-	Pod         api.Pod
-	Spec        Spec
+	ID  string
+	Pod api.Pod
+
+	// Stores the final procurement result, once set read-only.
+	// Meant to be set by algorith.SchedulerAlgorithm only.
+	Spec *Spec
+
 	Offer       offers.Perishable // thread-safe
 	State       StateType
 	Flags       map[FlagType]struct{}
 	CreateTime  time.Time
 	UpdatedTime time.Time // time of the most recent StatusUpdate we've seen from the mesos master
 
-	podStatus  api.PodStatus
-	executor   *mesos.ExecutorInfo // readonly
-	podKey     string
-	launchTime time.Time
-	bindTime   time.Time
-	mapper     HostPortMappingType
+	podStatus    api.PodStatus
+	prototype    *mesos.ExecutorInfo // readonly
+	allowedRoles []string            // roles under which pods are allowed to be launched
+	podKey       string
+	launchTime   time.Time
+	bindTime     time.Time
+	mapper       HostPortMapper
+}
+
+type Port struct {
+	Port uint64
+	Role string
 }
 
 type Spec struct {
 	SlaveID       string
 	AssignedSlave string
-	CPU           mresource.CPUShares
-	Memory        mresource.MegaBytes
+	Resources     []*mesos.Resource
 	PortMap       []HostPortMapping
-	Ports         []uint64
 	Data          []byte
+	Executor      *mesos.ExecutorInfo
 }
 
 // mostly-clone this pod task. the clone will actually share the some fields:
@@ -93,7 +103,6 @@ func (t *T) Clone() *T {
 	clone := *t
 
 	// deep copy
-	(&t.Spec).copyTo(&clone.Spec)
 	clone.Flags = map[FlagType]struct{}{}
 	for k := range t.Flags {
 		clone.Flags[k] = struct{}{}
@@ -101,20 +110,8 @@ func (t *T) Clone() *T {
 	return &clone
 }
 
-func (old *Spec) copyTo(new *Spec) {
-	if len(old.PortMap) > 0 {
-		new.PortMap = append(([]HostPortMapping)(nil), old.PortMap...)
-	}
-	if len(old.Ports) > 0 {
-		new.Ports = append(([]uint64)(nil), old.Ports...)
-	}
-	if len(old.Data) > 0 {
-		new.Data = append(([]byte)(nil), old.Data...)
-	}
-}
-
 func (t *T) HasAcceptedOffer() bool {
-	return t.Spec.SlaveID != ""
+	return t.Spec != nil
 }
 
 func (t *T) GetOfferId() string {
@@ -132,75 +129,21 @@ func generateTaskName(pod *api.Pod) string {
 	return fmt.Sprintf("%s.%s.pods", pod.Name, ns)
 }
 
-func (t *T) BuildTaskInfo() *mesos.TaskInfo {
+func (t *T) BuildTaskInfo() (*mesos.TaskInfo, error) {
+	if t.Spec == nil {
+		return nil, errors.New("no podtask.T.Spec given, cannot build task info")
+	}
+
 	info := &mesos.TaskInfo{
-		Name:     proto.String(generateTaskName(&t.Pod)),
-		TaskId:   mutil.NewTaskID(t.ID),
-		SlaveId:  mutil.NewSlaveID(t.Spec.SlaveID),
-		Executor: t.executor,
-		Data:     t.Spec.Data,
-		Resources: []*mesos.Resource{
-			mutil.NewScalarResource("cpus", float64(t.Spec.CPU)),
-			mutil.NewScalarResource("mem", float64(t.Spec.Memory)),
-		},
-	}
-	if portsResource := rangeResource("ports", t.Spec.Ports); portsResource != nil {
-		info.Resources = append(info.Resources, portsResource)
-	}
-	return info
-}
-
-// Fill the Spec in the T, should be called during k8s scheduling, before binding.
-func (t *T) FillFromDetails(details *mesos.Offer) error {
-	if details == nil {
-		//programming error
-		panic("offer details are nil")
+		Name:      proto.String(generateTaskName(&t.Pod)),
+		TaskId:    mutil.NewTaskID(t.ID),
+		Executor:  t.Spec.Executor,
+		Data:      t.Spec.Data,
+		Resources: t.Spec.Resources,
+		SlaveId:   mutil.NewSlaveID(t.Spec.SlaveID),
 	}
 
-	// compute used resources
-	cpu := mresource.PodCPULimit(&t.Pod)
-	mem := mresource.PodMemLimit(&t.Pod)
-	log.V(3).Infof("Recording offer(s) %s/%s against pod %v: cpu: %.2f, mem: %.2f MB", details.Id, t.Pod.Namespace, t.Pod.Name, cpu, mem)
-
-	t.Spec = Spec{
-		SlaveID:       details.GetSlaveId().GetValue(),
-		AssignedSlave: details.GetHostname(),
-		CPU:           cpu,
-		Memory:        mem,
-	}
-
-	// fill in port mapping
-	if mapping, err := t.mapper.Generate(t, details); err != nil {
-		t.Reset()
-		return err
-	} else {
-		ports := []uint64{}
-		for _, entry := range mapping {
-			ports = append(ports, entry.OfferPort)
-		}
-		t.Spec.PortMap = mapping
-		t.Spec.Ports = ports
-	}
-
-	// hostname needs of the executor needs to match that of the offer, otherwise
-	// the kubelet node status checker/updater is very unhappy
-	const HOSTNAME_OVERRIDE_FLAG = "--hostname-override="
-	hostname := details.GetHostname() // required field, non-empty
-	hostnameOverride := HOSTNAME_OVERRIDE_FLAG + hostname
-
-	argv := t.executor.Command.Arguments
-	overwrite := false
-	for i, arg := range argv {
-		if strings.HasPrefix(arg, HOSTNAME_OVERRIDE_FLAG) {
-			overwrite = true
-			argv[i] = hostnameOverride
-			break
-		}
-	}
-	if !overwrite {
-		t.executor.Command.Arguments = append(argv, hostnameOverride)
-	}
-	return nil
+	return info, nil
 }
 
 // Clear offer-related details from the task, should be called if/when an offer
@@ -208,66 +151,7 @@ func (t *T) FillFromDetails(details *mesos.Offer) error {
 func (t *T) Reset() {
 	log.V(3).Infof("Clearing offer(s) from pod %v", t.Pod.Name)
 	t.Offer = nil
-	t.Spec = Spec{}
-}
-
-func (t *T) AcceptOffer(offer *mesos.Offer) bool {
-	if offer == nil {
-		return false
-	}
-
-	// if the user has specified a target host, make sure this offer is for that host
-	if t.Pod.Spec.NodeName != "" && offer.GetHostname() != t.Pod.Spec.NodeName {
-		return false
-	}
-
-	// check the NodeSelector
-	if len(t.Pod.Spec.NodeSelector) > 0 {
-		slaveLabels := map[string]string{}
-		for _, a := range offer.Attributes {
-			if a.GetType() == mesos.Value_TEXT {
-				slaveLabels[a.GetName()] = a.GetText().GetValue()
-			}
-		}
-		selector := labels.SelectorFromSet(t.Pod.Spec.NodeSelector)
-		if !selector.Matches(labels.Set(slaveLabels)) {
-			return false
-		}
-	}
-
-	// check ports
-	if _, err := t.mapper.Generate(t, offer); err != nil {
-		log.V(3).Info(err)
-		return false
-	}
-
-	// find offered cpu and mem
-	var (
-		offeredCpus mresource.CPUShares
-		offeredMem  mresource.MegaBytes
-	)
-	for _, resource := range offer.Resources {
-		if resource.GetName() == "cpus" {
-			offeredCpus = mresource.CPUShares(*resource.GetScalar().Value)
-		}
-
-		if resource.GetName() == "mem" {
-			offeredMem = mresource.MegaBytes(*resource.GetScalar().Value)
-		}
-	}
-
-	// calculate cpu and mem sum over all containers of the pod
-	// TODO (@sttts): also support pod.spec.resources.limit.request
-	// TODO (@sttts): take into account the executor resources
-	cpu := mresource.PodCPULimit(&t.Pod)
-	mem := mresource.PodMemLimit(&t.Pod)
-	log.V(4).Infof("trying to match offer with pod %v/%v: cpus: %.2f mem: %.2f MB", t.Pod.Namespace, t.Pod.Name, cpu, mem)
-	if (cpu > offeredCpus) || (mem > offeredMem) {
-		log.V(3).Infof("not enough resources for pod %v/%v: cpus: %.2f mem: %.2f MB", t.Pod.Namespace, t.Pod.Name, cpu, mem)
-		return false
-	}
-
-	return true
+	t.Spec = nil
 }
 
 func (t *T) Set(f FlagType) {
@@ -284,27 +168,57 @@ func (t *T) Has(f FlagType) (exists bool) {
 	return
 }
 
-func New(ctx api.Context, id string, pod api.Pod, executor *mesos.ExecutorInfo) (*T, error) {
-	if executor == nil {
-		return nil, fmt.Errorf("illegal argument: executor was nil")
+func (t *T) Roles() []string {
+	var roles []string
+
+	if r, ok := t.Pod.ObjectMeta.Labels[annotation.RolesKey]; ok {
+		roles = strings.Split(r, ",")
+
+		for i, r := range roles {
+			roles[i] = strings.TrimSpace(r)
+		}
+
+		roles = filterRoles(roles, not(emptyRole), not(seenRole()))
+	} else {
+		// no roles label defined,
+		// by convention return the first allowed role
+		// to be used for launching the pod task
+		return []string{t.allowedRoles[0]}
 	}
+
+	return filterRoles(roles, inRoles(t.allowedRoles...))
+}
+
+func New(ctx api.Context, id string, pod *api.Pod, prototype *mesos.ExecutorInfo, allowedRoles []string) (*T, error) {
+	if prototype == nil {
+		return nil, fmt.Errorf("illegal argument: executor is nil")
+	}
+
+	if len(allowedRoles) == 0 {
+		allowedRoles = defaultRoles
+	}
+
 	key, err := MakePodKey(ctx, pod.Name)
 	if err != nil {
 		return nil, err
 	}
+
 	if id == "" {
 		id = "pod." + uuid.NewUUID().String()
 	}
+
 	task := &T{
-		ID:       id,
-		Pod:      pod,
-		State:    StatePending,
-		podKey:   key,
-		mapper:   MappingTypeForPod(&pod),
-		Flags:    make(map[FlagType]struct{}),
-		executor: proto.Clone(executor).(*mesos.ExecutorInfo),
+		ID:           id,
+		Pod:          *pod,
+		State:        StatePending,
+		podKey:       key,
+		mapper:       NewHostPortMapper(pod),
+		Flags:        make(map[FlagType]struct{}),
+		prototype:    prototype,
+		allowedRoles: allowedRoles,
 	}
 	task.CreateTime = time.Now()
+
 	return task, nil
 }
 
@@ -312,7 +226,7 @@ func (t *T) SaveRecoveryInfo(dict map[string]string) {
 	dict[annotation.TaskIdKey] = t.ID
 	dict[annotation.SlaveIdKey] = t.Spec.SlaveID
 	dict[annotation.OfferIdKey] = t.Offer.Details().Id.GetValue()
-	dict[annotation.ExecutorIdKey] = t.executor.ExecutorId.GetValue()
+	dict[annotation.ExecutorIdKey] = t.Spec.Executor.ExecutorId.GetValue()
 }
 
 // reconstruct a task from metadata stashed in a pod entry. there are limited pod states that
@@ -358,9 +272,10 @@ func RecoverFrom(pod api.Pod) (*T, bool, error) {
 		podKey:     key,
 		State:      StatePending, // possibly running? mesos will tell us during reconciliation
 		Flags:      make(map[FlagType]struct{}),
-		mapper:     MappingTypeForPod(&pod),
+		mapper:     NewHostPortMapper(&pod),
 		launchTime: now,
 		bindTime:   now,
+		Spec:       &Spec{},
 	}
 	var (
 		offerId string
@@ -370,7 +285,6 @@ func RecoverFrom(pod api.Pod) (*T, bool, error) {
 		annotation.TaskIdKey,
 		annotation.SlaveIdKey,
 		annotation.OfferIdKey,
-		annotation.ExecutorIdKey,
 	} {
 		v, found := pod.Annotations[k]
 		if !found {
@@ -388,7 +302,7 @@ func RecoverFrom(pod api.Pod) (*T, bool, error) {
 		case annotation.ExecutorIdKey:
 			// this is nowhere near sufficient to re-launch a task, but we really just
 			// want this for tracking
-			t.executor = &mesos.ExecutorInfo{ExecutorId: mutil.NewExecutorID(v)}
+			t.Spec.Executor = &mesos.ExecutorInfo{ExecutorId: mutil.NewExecutorID(v)}
 		}
 	}
 	t.Offer = offers.Expired(offerId, t.Spec.AssignedSlave, 0)

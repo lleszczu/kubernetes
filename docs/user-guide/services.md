@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/user-guide/services.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/user-guide/services.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -41,6 +41,8 @@ Documentation for other releases can be found at
   - [Defining a service](#defining-a-service)
     - [Services without selectors](#services-without-selectors)
   - [Virtual IPs and service proxies](#virtual-ips-and-service-proxies)
+    - [Proxy-mode: userspace](#proxy-mode-userspace)
+    - [Proxy-mode: iptables](#proxy-mode-iptables)
   - [Multi-Port Services](#multi-port-services)
   - [Choosing your own IP address](#choosing-your-own-ip-address)
     - [Why not use round-robin DNS?](#why-not-use-round-robin-dns)
@@ -51,11 +53,14 @@ Documentation for other releases can be found at
   - [Publishing services - service types](#publishing-services---service-types)
     - [Type NodePort](#type-nodeport)
     - [Type LoadBalancer](#type-loadbalancer)
+    - [External IPs](#external-ips)
   - [Shortcomings](#shortcomings)
   - [Future work](#future-work)
   - [The gory details of virtual IPs](#the-gory-details-of-virtual-ips)
     - [Avoiding collisions](#avoiding-collisions)
     - [IPs and VIPs](#ips-and-vips)
+      - [Userspace](#userspace)
+      - [Iptables](#iptables)
   - [API Object](#api-object)
 
 <!-- END MUNGE: GENERATED_TOC -->
@@ -172,7 +177,7 @@ In any of these scenarios you can define a service without a selector:
 }
 ```
 
-Because this has no selector, the corresponding `Endpoints` object will not be
+Because this service has no selector, the corresponding `Endpoints` object will not be
 created. You can manually map the service to your own specific endpoints:
 
 ```json
@@ -188,7 +193,7 @@ created. You can manually map the service to your own specific endpoints:
                 { "IP": "1.2.3.4" }
             ],
             "ports": [
-                { "port": 80 }
+                { "port": 9376 }
             ]
         }
     ]
@@ -199,32 +204,61 @@ NOTE: Endpoint IPs may not be loopback (127.0.0.0/8), link-local
 (169.254.0.0/16), or link-local multicast ((224.0.0.0/24).
 
 Accessing a `Service` without a selector works the same as if it had selector.
-The traffic will be routed to endpoints defined by the user (`1.2.3.4:80` in
+The traffic will be routed to endpoints defined by the user (`1.2.3.4:9376` in
 this example).
 
 ## Virtual IPs and service proxies
 
 Every node in a Kubernetes cluster runs a `kube-proxy`.  This application
-watches the Kubernetes master for the addition and removal of `Service`
-and `Endpoints` objects. For each `Service` it opens a port (randomly chosen)
-on the local node.  Any connections made to that port will be proxied to one of
-the corresponding backend `Pods`.  Which backend to use is decided based on the
+is responsible for implementing a form of virtual IP for `Service`s.  In
+Kubernetes v1.0 the proxy was purely in userspace.  In Kubernetes v1.1 an
+iptables proxy was added, but was not the default operating mode.  In
+Kubernetes v1.2 we expect the iptables proxy to be the default.
+
+As of Kubernetes v1.0, `Services` are a "layer 3" (TCP/UDP over IP) construct.
+In Kubernetes v1.1 the `Ingress` API was added (beta) to represent "layer 7"
+(HTTP) services.
+
+### Proxy-mode: userspace
+
+In this mode, kube-proxy watches the Kubernetes master for the addition and
+removal of `Service` and `Endpoints` objects. For each `Service` it opens a
+port (randomly chosen) on the local node.  Any connections to this "proxy port"
+will be proxied to one of the `Service`'s backend `Pods` (as reported in
+`Endpoints`).  Which backend `Pod`  to use is decided based on the
 `SessionAffinity` of the `Service`.  Lastly, it installs iptables rules which
-capture traffic to the `Service`'s cluster IP (which is virtual) and `Port` and
-redirects that traffic to the previously described port.
+capture traffic to the `Service`'s `clusterIP` (which is virtual) and `Port`
+and redirects that traffic to the proxy port which proxies the a backend `Pod`.
 
-The net result is that any traffic bound for the `Service` is proxied to an
-appropriate backend without the clients knowing anything about Kubernetes or
-`Services` or `Pods`.
+The net result is that any traffic bound for the `Service`'s IP:Port is proxied
+to an appropriate backend without the clients knowing anything about Kubernetes
+or `Services` or `Pods`.
 
-![Services overview diagram](services-overview.png)
+By default, the choice of backend is round robin.  Client-IP based session affinity
+can be selected by setting `service.spec.sessionAffinity` to `"ClientIP"` (the
+default is `"None"`).
+
+![Services overview diagram for userspace proxy](services-userspace-overview.png)
+
+### Proxy-mode: iptables
+
+In this mode, kube-proxy watches the Kubernetes master for the addition and
+removal of `Service` and `Endpoints` objects. For each `Service` it installs
+iptables rules which capture traffic to the `Service`'s `clusterIP` (which is
+virtual) and `Port` and redirects that traffic to one of the `Service`'s
+backend sets.  For each `Endpoints` object it installs iptables rules which
+select a backend `Pod`.
 
 By default, the choice of backend is random.  Client-IP based session affinity
 can be selected by setting `service.spec.sessionAffinity` to `"ClientIP"` (the
 default is `"None"`).
 
-As of Kubernetes 1.0, `Services` are a "layer 3" (TCP/UDP over IP) construct.  We do not
-yet have a concept of "layer 7" (HTTP) services.
+As with the userspace proxy, the net result is that any traffic bound for the
+`Service`'s IP:Port is proxied to an appropriate backend without the clients
+knowing anything about Kubernetes or `Services` or `Pods`. This should be
+faster and more reliable than the userspace proxy.
+
+![Services overview diagram for iptables proxy](services-iptables-overview.png)
 
 ## Multi-Port Services
 
@@ -433,6 +467,7 @@ information about the provisioned balancer will be published in the `Service`'s
             }
         ],
         "clusterIP": "10.0.171.239",
+        "loadBalancerIP": "78.11.24.19",
         "type": "LoadBalancer"
     },
     "status": {
@@ -448,18 +483,58 @@ information about the provisioned balancer will be published in the `Service`'s
 ```
 
 Traffic from the external load balancer will be directed at the backend `Pods`,
-though exactly how that works depends on the cloud provider.
+though exactly how that works depends on the cloud provider. Some cloud providers allow
+the `loadBalancerIP` to be specified. In those cases, the load-balancer will be created
+with the user-specified `loadBalancerIP`. If the `loadBalancerIP` field is not specified,
+an ephemeral IP will be assigned to the loadBalancer. If the `loadBalancerIP` is specified, but the
+cloud provider does not support the feature, the field will be ignored.
+
+### External IPs
+
+If there are external IPs that route to one or more cluster nodes, Kubernetes services can be exposed on those
+`externalIPs`. Traffic that ingresses into the cluster with the external IP (as destination IP), on the service port,
+will be routed to one of the service endpoints. `externalIPs` are not managed by Kubernetes and are the responsibility
+of the cluster administrator.
+
+In the ServiceSpec, `externalIPs` can be specified along with any of the `ServiceTypes`.
+In the example below, my-service can be accessed by clients on 80.11.12.10:80 (externalIP:port)
+
+```json
+{
+    "kind": "Service",
+    "apiVersion": "v1",
+    "metadata": {
+        "name": "my-service"
+    },
+    "spec": {
+        "selector": {
+            "app": "MyApp"
+        },
+        "ports": [
+            {
+                "name": "http",
+                "protocol": "TCP",
+                "port": 80,
+                "targetPort": 9376
+            }
+        ],
+        "externalIPs" : [
+            "80.11.12.10"
+        ]
+    }
+}
+```
 
 ## Shortcomings
 
-We expect that using iptables and userspace proxies for VIPs will work at
-small to medium scale, but may not scale to very large clusters with thousands
-of Services.  See [the original design proposal for
-portals](http://issue.k8s.io/1107) for more
-details.
+Using the userspace proxy for VIPs will work at small to medium scale, but will
+not scale to very large clusters with thousands of Services.  See [the original
+design proposal for portals](http://issue.k8s.io/1107) for more details.
 
-Using the kube-proxy obscures the source-IP of a packet accessing a `Service`.
-This makes some kinds of firewalling impossible.
+Using the userspace proxy obscures the source-IP of a packet accessing a `Service`.
+This makes some kinds of firewalling impossible.  The iptables proxier does not
+obscure in-cluster source IPs, but it does still impact clients coming through
+a load-balancer or node-port.
 
 LoadBalancers only support TCP, not UDP.
 
@@ -475,13 +550,7 @@ simple round robin balancing, for example master-elected or sharded.  We also
 envision that some `Services` will have "real" load balancers, in which case the
 VIP will simply transport the packets there.
 
-There's a
-[proposal](http://issue.k8s.io/3760) to
-eliminate userspace proxying in favor of doing it all in iptables.  This should
-perform better and fix the source-IP obfuscation, though is less flexible than
-arbitrary userspace code.
-
-We intend to have first-class support for L7 (HTTP) `Services`.
+We intend to improve our support for L7 (HTTP) `Services`.
 
 We intend to have more flexible ingress modes for `Services` which encompass
 the current `ClusterIP`, `NodePort`, and `LoadBalancer` modes and more.
@@ -523,6 +592,11 @@ VIP, their traffic is automatically transported to an appropriate endpoint.
 The environment variables and DNS for `Services` are actually populated in
 terms of the `Service`'s VIP and port.
 
+We support two proxy modes - userspace and iptables, which operate slightly
+differently.
+
+#### Userspace
+
 As an example, consider the image processing application described above.
 When the backend `Service` is created, the Kubernetes master assigns a virtual
 IP address, for example 10.0.0.1.  Assuming the `Service` port is 1234, the
@@ -539,13 +613,30 @@ This means that `Service` owners can choose any port they want without risk of
 collision.  Clients can simply connect to an IP and port, without being aware
 of which `Pods` they are actually accessing.
 
-![Services detailed diagram](services-detail.png)
+#### Iptables
+
+Again, consider the image processing application described above.
+When the backend `Service` is created, the Kubernetes master assigns a virtual
+IP address, for example 10.0.0.1.  Assuming the `Service` port is 1234, the
+`Service` is observed by all of the `kube-proxy` instances in the cluster.
+When a proxy sees a new `Service`, it installs a series of iptables rules which
+redirect from the VIP to per-`Service` rules.  The per-`Service` rules link to
+per-`Endpoint` rules which redirect (Destination NAT) to the backends.
+
+When a client connects to the VIP the iptables rule kicks in.  A backend is
+chosen (either based on session affinity or randomly) and packets are
+redirected to the backend.  Unlike the userspace proxy, packets are never
+copied to userspace, the kube-proxy does not have to be running for the VIP to
+work, and the client IP is not altered.
+
+This same basic flow executes when traffic comes in through a node-port or
+through a load-balancer, though in those cases the client IP does get altered.
 
 ## API Object
 
 Service is a top-level resource in the kubernetes REST API. More details about the
 API object can be found at: [Service API
-object](https://htmlpreview.github.io/?https://github.com/GoogleCloudPlatform/kubernetes/HEAD/docs/api-reference/definitions.html#_v1_service).
+object](https://htmlpreview.github.io/?https://github.com/kubernetes/kubernetes/blob/HEAD/docs/api-reference/v1/definitions.html#_v1_service).
 
 
 <!-- BEGIN MUNGE: GENERATED_ANALYTICS -->

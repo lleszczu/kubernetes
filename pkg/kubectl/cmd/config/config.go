@@ -100,7 +100,7 @@ func NewDefaultPathOptions() *PathOptions {
 		EnvVar:           clientcmd.RecommendedConfigPathEnvVar,
 		ExplicitFileFlag: clientcmd.RecommendedConfigPathFlag,
 
-		GlobalFileSubpath: clientcmd.RecommendedHomeFileName,
+		GlobalFileSubpath: path.Join(clientcmd.RecommendedHomeDir, clientcmd.RecommendedFileName),
 
 		LoadingRules: clientcmd.NewDefaultClientConfigLoadingRules(),
 	}
@@ -225,6 +225,7 @@ func ModifyConfig(configAccess ConfigAccess, newConfig clientcmdapi.Config, rela
 
 			configToWrite := getConfigFromFileOrDie(destinationFile)
 			t := *cluster
+
 			configToWrite.Clusters[key] = &t
 			configToWrite.Clusters[key].LocationOfOrigin = destinationFile
 			if relativizePaths {

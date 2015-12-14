@@ -14,20 +14,24 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package namespacecontroller
+package namespace
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/errors"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/client/unversioned/testclient"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/sets"
 )
 
 func TestFinalized(t *testing.T) {
-	testNamespace := api.Namespace{
+	testNamespace := &api.Namespace{
 		Spec: api.NamespaceSpec{
 			Finalizers: []api.FinalizerName{"a", "b"},
 		},
@@ -41,9 +45,9 @@ func TestFinalized(t *testing.T) {
 	}
 }
 
-func TestFinalize(t *testing.T) {
+func TestFinalizeNamespaceFunc(t *testing.T) {
 	mockClient := &testclient.Fake{}
-	testNamespace := api.Namespace{
+	testNamespace := &api.Namespace{
 		ObjectMeta: api.ObjectMeta{
 			Name:            "test",
 			ResourceVersion: "1",
@@ -52,7 +56,7 @@ func TestFinalize(t *testing.T) {
 			Finalizers: []api.FinalizerName{"kubernetes", "other"},
 		},
 	}
-	finalize(mockClient, testNamespace)
+	finalizeNamespaceFunc(mockClient, testNamespace)
 	actions := mockClient.Actions()
 	if len(actions) != 1 {
 		t.Errorf("Expected 1 mock client action, but got %v", len(actions))
@@ -69,10 +73,9 @@ func TestFinalize(t *testing.T) {
 	}
 }
 
-func TestSyncNamespaceThatIsTerminating(t *testing.T) {
-	mockClient := &testclient.Fake{}
-	now := util.Now()
-	testNamespace := api.Namespace{
+func testSyncNamespaceThatIsTerminating(t *testing.T, versions *unversioned.APIVersions) {
+	now := unversioned.Now()
+	testNamespacePendingFinalize := &api.Namespace{
 		ObjectMeta: api.ObjectMeta{
 			Name:              "test",
 			ResourceVersion:   "1",
@@ -85,34 +88,123 @@ func TestSyncNamespaceThatIsTerminating(t *testing.T) {
 			Phase: api.NamespaceTerminating,
 		},
 	}
-	err := syncNamespace(mockClient, testNamespace)
-	if err != nil {
-		t.Errorf("Unexpected error when synching namespace %v", err)
+	testNamespaceFinalizeComplete := &api.Namespace{
+		ObjectMeta: api.ObjectMeta{
+			Name:              "test",
+			ResourceVersion:   "1",
+			DeletionTimestamp: &now,
+		},
+		Spec: api.NamespaceSpec{},
+		Status: api.NamespaceStatus{
+			Phase: api.NamespaceTerminating,
+		},
 	}
+
 	// TODO: Reuse the constants for all these strings from testclient
-	expectedActionSet := util.NewStringSet(
+	pendingActionSet := sets.NewString(
+		strings.Join([]string{"get", "namespaces", ""}, "-"),
 		strings.Join([]string{"list", "replicationcontrollers", ""}, "-"),
 		strings.Join([]string{"list", "services", ""}, "-"),
 		strings.Join([]string{"list", "pods", ""}, "-"),
 		strings.Join([]string{"list", "resourcequotas", ""}, "-"),
 		strings.Join([]string{"list", "secrets", ""}, "-"),
 		strings.Join([]string{"list", "limitranges", ""}, "-"),
-		strings.Join([]string{"list", "events", ""}, "-"),
+		strings.Join([]string{"delete-collection", "events", ""}, "-"),
+		strings.Join([]string{"list", "serviceaccounts", ""}, "-"),
+		strings.Join([]string{"list", "persistentvolumeclaims", ""}, "-"),
 		strings.Join([]string{"create", "namespaces", "finalize"}, "-"),
-		strings.Join([]string{"delete", "namespaces", ""}, "-"),
 	)
-	actionSet := util.NewStringSet()
-	for _, action := range mockClient.Actions() {
-		actionSet.Insert(strings.Join([]string{action.GetVerb(), action.GetResource(), action.GetSubresource()}, "-"))
+
+	if containsVersion(versions, "extensions/v1beta1") {
+		pendingActionSet.Insert(
+			strings.Join([]string{"list", "daemonsets", ""}, "-"),
+			strings.Join([]string{"list", "deployments", ""}, "-"),
+			strings.Join([]string{"list", "jobs", ""}, "-"),
+			strings.Join([]string{"list", "horizontalpodautoscalers", ""}, "-"),
+			strings.Join([]string{"list", "ingresses", ""}, "-"),
+			strings.Join([]string{"get", "resource", ""}, "-"),
+		)
 	}
-	if !actionSet.HasAll(expectedActionSet.List()...) {
-		t.Errorf("Expected actions: %v, but got: %v", expectedActionSet, actionSet)
+
+	scenarios := map[string]struct {
+		testNamespace     *api.Namespace
+		expectedActionSet sets.String
+	}{
+		"pending-finalize": {
+			testNamespace:     testNamespacePendingFinalize,
+			expectedActionSet: pendingActionSet,
+		},
+		"complete-finalize": {
+			testNamespace: testNamespaceFinalizeComplete,
+			expectedActionSet: sets.NewString(
+				strings.Join([]string{"get", "namespaces", ""}, "-"),
+				strings.Join([]string{"delete", "namespaces", ""}, "-"),
+			),
+		},
 	}
+
+	for scenario, testInput := range scenarios {
+		mockClient := testclient.NewSimpleFake(testInput.testNamespace)
+		if containsVersion(versions, "extensions/v1beta1") {
+			resources := []unversioned.APIResource{}
+			for _, resource := range []string{"daemonsets", "deployments", "jobs", "horizontalpodautoscalers", "ingresses"} {
+				resources = append(resources, unversioned.APIResource{Name: resource})
+			}
+			mockClient.Resources = map[string]*unversioned.APIResourceList{
+				"extensions/v1beta1": {
+					GroupVersion: "extensions/v1beta1",
+					APIResources: resources,
+				},
+			}
+		}
+		err := syncNamespace(mockClient, versions, testInput.testNamespace)
+		if err != nil {
+			t.Errorf("scenario %s - Unexpected error when synching namespace %v", scenario, err)
+		}
+		actionSet := sets.NewString()
+		for _, action := range mockClient.Actions() {
+			actionSet.Insert(strings.Join([]string{action.GetVerb(), action.GetResource(), action.GetSubresource()}, "-"))
+		}
+		if !actionSet.HasAll(testInput.expectedActionSet.List()...) {
+			t.Errorf("scenario %s - Expected actions:\n%v\n but got:\n%v\nDifference:\n%v", scenario, testInput.expectedActionSet, actionSet, testInput.expectedActionSet.Difference(actionSet))
+		}
+		if !testInput.expectedActionSet.HasAll(actionSet.List()...) {
+			t.Errorf("scenario %s - Expected actions:\n%v\n but got:\n%v\nDifference:\n%v", scenario, testInput.expectedActionSet, actionSet, actionSet.Difference(testInput.expectedActionSet))
+		}
+	}
+}
+
+func TestRetryOnConflictError(t *testing.T) {
+	mockClient := &testclient.Fake{}
+	numTries := 0
+	retryOnce := func(kubeClient client.Interface, namespace *api.Namespace) (*api.Namespace, error) {
+		numTries++
+		if numTries <= 1 {
+			return namespace, errors.NewConflict(namespace.Kind, namespace.Name, fmt.Errorf("ERROR!"))
+		}
+		return namespace, nil
+	}
+	namespace := &api.Namespace{}
+	_, err := retryOnConflictError(mockClient, namespace, retryOnce)
+	if err != nil {
+		t.Errorf("Unexpected error %v", err)
+	}
+	if numTries != 2 {
+		t.Errorf("Expected %v, but got %v", 2, numTries)
+	}
+}
+
+func TestSyncNamespaceThatIsTerminatingNonExperimental(t *testing.T) {
+	testSyncNamespaceThatIsTerminating(t, &unversioned.APIVersions{})
+}
+
+func TestSyncNamespaceThatIsTerminatingV1Beta1(t *testing.T) {
+	testSyncNamespaceThatIsTerminating(t, &unversioned.APIVersions{Versions: []string{"extensions/v1beta1"}})
 }
 
 func TestSyncNamespaceThatIsActive(t *testing.T) {
 	mockClient := &testclient.Fake{}
-	testNamespace := api.Namespace{
+	testNamespace := &api.Namespace{
 		ObjectMeta: api.ObjectMeta{
 			Name:            "test",
 			ResourceVersion: "1",
@@ -124,7 +216,7 @@ func TestSyncNamespaceThatIsActive(t *testing.T) {
 			Phase: api.NamespaceActive,
 		},
 	}
-	err := syncNamespace(mockClient, testNamespace)
+	err := syncNamespace(mockClient, &unversioned.APIVersions{}, testNamespace)
 	if err != nil {
 		t.Errorf("Unexpected error when synching namespace %v", err)
 	}
@@ -134,9 +226,9 @@ func TestSyncNamespaceThatIsActive(t *testing.T) {
 }
 
 func TestRunStop(t *testing.T) {
-	o := testclient.NewObjects(api.Scheme, api.Scheme)
-	client := &testclient.Fake{ReactFn: testclient.ObjectReaction(o, api.RESTMapper)}
-	nsController := NewNamespaceController(client, 1*time.Second)
+	mockClient := &testclient.Fake{}
+
+	nsController := NewNamespaceController(mockClient, &unversioned.APIVersions{}, 1*time.Second)
 
 	if nsController.StopEverything != nil {
 		t.Errorf("Non-running manager should not have a stop channel.  Got %v", nsController.StopEverything)

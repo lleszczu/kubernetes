@@ -244,7 +244,7 @@ func newPod(host string, hostPorts ...int) *api.Pod {
 	}
 }
 
-func TestPodFitsPorts(t *testing.T) {
+func TestPodFitsHostPorts(t *testing.T) {
 	tests := []struct {
 		pod          *api.Pod
 		existingPods []*api.Pod
@@ -291,7 +291,7 @@ func TestPodFitsPorts(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		fits, err := PodFitsPorts(test.pod, test.existingPods, "machine")
+		fits, err := PodFitsHostPorts(test.pod, test.existingPods, "machine")
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
@@ -404,6 +404,61 @@ func TestAWSDiskConflicts(t *testing.T) {
 				VolumeSource: api.VolumeSource{
 					AWSElasticBlockStore: &api.AWSElasticBlockStoreVolumeSource{
 						VolumeID: "bar",
+					},
+				},
+			},
+		},
+	}
+	tests := []struct {
+		pod          *api.Pod
+		existingPods []*api.Pod
+		isOk         bool
+		test         string
+	}{
+		{&api.Pod{}, []*api.Pod{}, true, "nothing"},
+		{&api.Pod{}, []*api.Pod{{Spec: volState}}, true, "one state"},
+		{&api.Pod{Spec: volState}, []*api.Pod{{Spec: volState}}, false, "same state"},
+		{&api.Pod{Spec: volState2}, []*api.Pod{{Spec: volState}}, true, "different state"},
+	}
+
+	for _, test := range tests {
+		ok, err := NoDiskConflict(test.pod, test.existingPods, "machine")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if test.isOk && !ok {
+			t.Errorf("expected ok, got none.  %v %v %s", test.pod, test.existingPods, test.test)
+		}
+		if !test.isOk && ok {
+			t.Errorf("expected no ok, got one.  %v %v %s", test.pod, test.existingPods, test.test)
+		}
+	}
+}
+
+func TestRBDDiskConflicts(t *testing.T) {
+	volState := api.PodSpec{
+		Volumes: []api.Volume{
+			{
+				VolumeSource: api.VolumeSource{
+					RBD: &api.RBDVolumeSource{
+						CephMonitors: []string{"a", "b"},
+						RBDPool:      "foo",
+						RBDImage:     "bar",
+						FSType:       "ext4",
+					},
+				},
+			},
+		},
+	}
+	volState2 := api.PodSpec{
+		Volumes: []api.Volume{
+			{
+				VolumeSource: api.VolumeSource{
+					RBD: &api.RBDVolumeSource{
+						CephMonitors: []string{"c", "d"},
+						RBDPool:      "foo",
+						RBDImage:     "bar",
+						FSType:       "ext4",
 					},
 				},
 			},
@@ -637,7 +692,7 @@ func TestServiceAffinity(t *testing.T) {
 			services: []api.Service{{Spec: api.ServiceSpec{Selector: selector}}},
 			fits:     true,
 			labels:   []string{"region"},
-			test:     "service pod on same minion",
+			test:     "service pod on same node",
 		},
 		{
 			pod:      &api.Pod{ObjectMeta: api.ObjectMeta{Labels: selector}},
@@ -646,7 +701,7 @@ func TestServiceAffinity(t *testing.T) {
 			services: []api.Service{{Spec: api.ServiceSpec{Selector: selector}}},
 			fits:     true,
 			labels:   []string{"region"},
-			test:     "service pod on different minion, region match",
+			test:     "service pod on different node, region match",
 		},
 		{
 			pod:      &api.Pod{ObjectMeta: api.ObjectMeta{Labels: selector}},
@@ -655,7 +710,7 @@ func TestServiceAffinity(t *testing.T) {
 			services: []api.Service{{Spec: api.ServiceSpec{Selector: selector}}},
 			fits:     false,
 			labels:   []string{"region"},
-			test:     "service pod on different minion, region mismatch",
+			test:     "service pod on different node, region mismatch",
 		},
 		{
 			pod:      &api.Pod{ObjectMeta: api.ObjectMeta{Labels: selector, Namespace: "ns1"}},
@@ -691,7 +746,7 @@ func TestServiceAffinity(t *testing.T) {
 			services: []api.Service{{Spec: api.ServiceSpec{Selector: selector}}},
 			fits:     false,
 			labels:   []string{"region", "zone"},
-			test:     "service pod on different minion, multiple labels, not all match",
+			test:     "service pod on different node, multiple labels, not all match",
 		},
 		{
 			pod:      &api.Pod{ObjectMeta: api.ObjectMeta{Labels: selector}},
@@ -700,7 +755,7 @@ func TestServiceAffinity(t *testing.T) {
 			services: []api.Service{{Spec: api.ServiceSpec{Selector: selector}}},
 			fits:     true,
 			labels:   []string{"region", "zone"},
-			test:     "service pod on different minion, multiple labels, all match",
+			test:     "service pod on different node, multiple labels, all match",
 		},
 	}
 

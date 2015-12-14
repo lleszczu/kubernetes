@@ -19,27 +19,32 @@ package cmd
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/spf13/cobra"
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/testapi"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/client/unversioned/fake"
 )
 
 type fakePortForwarder struct {
-	req   *client.Request
-	pfErr error
+	method string
+	url    *url.URL
+	pfErr  error
 }
 
-func (f *fakePortForwarder) ForwardPorts(req *client.Request, config *client.Config, ports []string, stopChan <-chan struct{}) error {
-	f.req = req
+func (f *fakePortForwarder) ForwardPorts(method string, url *url.URL, config *client.Config, ports []string, stopChan <-chan struct{}) error {
+	f.method = method
+	f.url = url
 	return f.pfErr
 }
 
 func TestPortForward(t *testing.T) {
-	version := testapi.Version()
+	version := testapi.Default.GroupVersion().Version
 
 	tests := []struct {
 		name, version, podPath, pfPath, container string
@@ -64,9 +69,9 @@ func TestPortForward(t *testing.T) {
 	}
 	for _, test := range tests {
 		f, tf, codec := NewAPIFactory()
-		tf.Client = &client.FakeRESTClient{
+		tf.Client = &fake.RESTClient{
 			Codec: codec,
-			Client: client.HTTPClientFunc(func(req *http.Request) (*http.Response, error) {
+			Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
 				switch p, m := req.URL.Path, req.Method; {
 				case p == test.podPath && m == "GET":
 					body := objBody(codec, test.pod)
@@ -79,7 +84,7 @@ func TestPortForward(t *testing.T) {
 			}),
 		}
 		tf.Namespace = "test"
-		tf.ClientConfig = &client.Config{Version: test.version}
+		tf.ClientConfig = &client.Config{GroupVersion: &unversioned.GroupVersion{Version: test.version}}
 		ff := &fakePortForwarder{}
 		if test.pfErr {
 			ff.pfErr = fmt.Errorf("pf error")
@@ -91,17 +96,25 @@ func TestPortForward(t *testing.T) {
 		if test.pfErr && err != ff.pfErr {
 			t.Errorf("%s: Unexpected exec error: %v", test.name, err)
 		}
-		if !test.pfErr && ff.req.URL().Path != test.pfPath {
-			t.Errorf("%s: Did not get expected path for portforward request", test.name)
-		}
 		if !test.pfErr && err != nil {
 			t.Errorf("%s: Unexpected error: %v", test.name, err)
 		}
+		if test.pfErr {
+			continue
+		}
+
+		if ff.url.Path != test.pfPath {
+			t.Errorf("%s: Did not get expected path for portforward request", test.name)
+		}
+		if ff.method != "POST" {
+			t.Errorf("%s: Did not get method for attach request: %s", test.name, ff.method)
+		}
+
 	}
 }
 
 func TestPortForwardWithPFlag(t *testing.T) {
-	version := testapi.Version()
+	version := testapi.Default.GroupVersion().Version
 
 	tests := []struct {
 		name, version, podPath, pfPath, container string
@@ -126,9 +139,9 @@ func TestPortForwardWithPFlag(t *testing.T) {
 	}
 	for _, test := range tests {
 		f, tf, codec := NewAPIFactory()
-		tf.Client = &client.FakeRESTClient{
+		tf.Client = &fake.RESTClient{
 			Codec: codec,
-			Client: client.HTTPClientFunc(func(req *http.Request) (*http.Response, error) {
+			Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
 				switch p, m := req.URL.Path, req.Method; {
 				case p == test.podPath && m == "GET":
 					body := objBody(codec, test.pod)
@@ -141,7 +154,7 @@ func TestPortForwardWithPFlag(t *testing.T) {
 			}),
 		}
 		tf.Namespace = "test"
-		tf.ClientConfig = &client.Config{Version: test.version}
+		tf.ClientConfig = &client.Config{GroupVersion: &unversioned.GroupVersion{Version: test.version}}
 		ff := &fakePortForwarder{}
 		if test.pfErr {
 			ff.pfErr = fmt.Errorf("pf error")
@@ -153,7 +166,7 @@ func TestPortForwardWithPFlag(t *testing.T) {
 		if test.pfErr && err != ff.pfErr {
 			t.Errorf("%s: Unexpected exec error: %v", test.name, err)
 		}
-		if !test.pfErr && ff.req.URL().Path != test.pfPath {
+		if !test.pfErr && ff.url.Path != test.pfPath {
 			t.Errorf("%s: Did not get expected path for portforward request", test.name)
 		}
 		if !test.pfErr && err != nil {

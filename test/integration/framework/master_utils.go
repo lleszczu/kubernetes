@@ -18,6 +18,7 @@ package framework
 
 import (
 	"io/ioutil"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -27,19 +28,18 @@ import (
 
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/latest"
 	"k8s.io/kubernetes/pkg/api/testapi"
 	"k8s.io/kubernetes/pkg/apiserver"
+	"k8s.io/kubernetes/pkg/client/record"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/client/unversioned/record"
-	"k8s.io/kubernetes/pkg/controller/replication"
-	explatest "k8s.io/kubernetes/pkg/expapi/latest"
+	"k8s.io/kubernetes/pkg/controller"
+	replicationcontroller "k8s.io/kubernetes/pkg/controller/replication"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/kubectl"
-	"k8s.io/kubernetes/pkg/labels"
+	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
 	"k8s.io/kubernetes/pkg/master"
-	"k8s.io/kubernetes/pkg/storage"
-	"k8s.io/kubernetes/pkg/tools/etcdtest"
+	etcdstorage "k8s.io/kubernetes/pkg/storage/etcd"
+	"k8s.io/kubernetes/pkg/storage/etcd/etcdtest"
 	"k8s.io/kubernetes/plugin/pkg/admission/admit"
 )
 
@@ -73,8 +73,6 @@ type MasterComponents struct {
 	rcStopCh chan struct{}
 	// Used to stop master components individually, and via MasterComponents.Stop
 	once sync.Once
-	// Kubernetes etcd storage, has embedded etcd client
-	EtcdStorage storage.Interface
 }
 
 // Config is a struct of configuration directives for NewMasterComponents.
@@ -93,15 +91,15 @@ type Config struct {
 
 // NewMasterComponents creates, initializes and starts master components based on the given config.
 func NewMasterComponents(c *Config) *MasterComponents {
-	m, s, e := startMasterOrDie(c.MasterConfig)
+	m, s := startMasterOrDie(c.MasterConfig)
 	// TODO: Allow callers to pipe through a different master url and create a client/start components using it.
 	glog.Infof("Master %+v", s.URL)
 	if c.DeleteEtcdKeys {
 		DeleteAllEtcdKeys()
 	}
-	restClient := client.NewOrDie(&client.Config{Host: s.URL, Version: testapi.Version(), QPS: c.QPS, Burst: c.Burst})
+	restClient := client.NewOrDie(&client.Config{Host: s.URL, GroupVersion: testapi.Default.GroupVersion(), QPS: c.QPS, Burst: c.Burst})
 	rcStopCh := make(chan struct{})
-	controllerManager := replicationcontroller.NewReplicationManager(restClient, c.Burst)
+	controllerManager := replicationcontroller.NewReplicationManager(restClient, controller.NoResyncPeriodFunc, c.Burst)
 
 	// TODO: Support events once we can cleanly shutdown an event recorder.
 	controllerManager.SetEventRecorder(&record.FakeRecorder{})
@@ -115,48 +113,56 @@ func NewMasterComponents(c *Config) *MasterComponents {
 		RestClient:        restClient,
 		ControllerManager: controllerManager,
 		rcStopCh:          rcStopCh,
-		EtcdStorage:       e,
 		once:              once,
 	}
 }
 
 // startMasterOrDie starts a kubernetes master and an httpserver to handle api requests
-func startMasterOrDie(masterConfig *master.Config) (*master.Master, *httptest.Server, storage.Interface) {
+func startMasterOrDie(masterConfig *master.Config) (*master.Master, *httptest.Server) {
 	var m *master.Master
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
 
-	var etcdStorage storage.Interface
-	var err error
 	if masterConfig == nil {
-		etcdClient := NewEtcdClient()
-		etcdStorage, err = master.NewEtcdStorage(etcdClient, latest.InterfacesFor, latest.Version, etcdtest.PathPrefix())
-		if err != nil {
-			glog.Fatalf("Failed to create etcd storage for master %v", err)
-		}
-		expEtcdStorage, err := master.NewEtcdStorage(etcdClient, explatest.InterfacesFor, explatest.Version, etcdtest.PathPrefix())
-		if err != nil {
-			glog.Fatalf("Failed to create etcd storage for master %v", err)
-		}
-
-		masterConfig = &master.Config{
-			DatabaseStorage:    etcdStorage,
-			ExpDatabaseStorage: expEtcdStorage,
-			KubeletClient:      client.FakeKubeletClient{},
-			EnableLogsSupport:  false,
-			EnableProfiling:    true,
-			EnableUISupport:    false,
-			APIPrefix:          "/api",
-			ExpAPIPrefix:       "/experimental",
-			Authorizer:         apiserver.NewAlwaysAllowAuthorizer(),
-			AdmissionControl:   admit.NewAlwaysAdmit(),
-		}
-	} else {
-		etcdStorage = masterConfig.DatabaseStorage
+		masterConfig = NewMasterConfig()
+		masterConfig.EnableProfiling = true
+		masterConfig.EnableSwaggerSupport = true
 	}
 	m = master.New(masterConfig)
-	return m, s, etcdStorage
+	return m, s
+}
+
+// Returns a basic master config.
+func NewMasterConfig() *master.Config {
+	etcdClient := NewEtcdClient()
+	storageVersions := make(map[string]string)
+	etcdStorage := etcdstorage.NewEtcdStorage(etcdClient, testapi.Default.Codec(), etcdtest.PathPrefix())
+	storageVersions[""] = testapi.Default.GroupVersion().String()
+	expEtcdStorage := NewExtensionsEtcdStorage(etcdClient)
+	storageVersions["extensions"] = testapi.Extensions.GroupVersion().String()
+	storageDestinations := master.NewStorageDestinations()
+	storageDestinations.AddAPIGroup("", etcdStorage)
+	storageDestinations.AddAPIGroup("extensions", expEtcdStorage)
+
+	return &master.Config{
+		StorageDestinations: storageDestinations,
+		StorageVersions:     storageVersions,
+		KubeletClient:       kubeletclient.FakeKubeletClient{},
+		APIPrefix:           "/api",
+		APIGroupPrefix:      "/apis",
+		Authorizer:          apiserver.NewAlwaysAllowAuthorizer(),
+		AdmissionControl:    admit.NewAlwaysAdmit(),
+	}
+}
+
+// Returns the master config appropriate for most integration tests.
+func NewIntegrationTestMasterConfig() *master.Config {
+	masterConfig := NewMasterConfig()
+	masterConfig.EnableCoreControllers = true
+	masterConfig.EnableIndex = true
+	masterConfig.PublicAddress = net.ParseIP("192.168.10.4")
+	return masterConfig
 }
 
 func (m *MasterComponents) stopRCManager() {
@@ -190,11 +196,11 @@ func RCFromManifest(fileName string) *api.ReplicationController {
 
 // StopRC stops the rc via kubectl's stop library
 func StopRC(rc *api.ReplicationController, restClient *client.Client) error {
-	reaper, err := kubectl.ReaperFor("ReplicationController", restClient, nil)
+	reaper, err := kubectl.ReaperFor(api.Kind("ReplicationController"), restClient)
 	if err != nil || reaper == nil {
 		return err
 	}
-	_, err = reaper.Stop(rc.Namespace, rc.Name, 0, nil)
+	err = reaper.Stop(rc.Namespace, rc.Name, 0, nil)
 	if err != nil {
 		return err
 	}
@@ -203,7 +209,7 @@ func StopRC(rc *api.ReplicationController, restClient *client.Client) error {
 
 // ScaleRC scales the given rc to the given replicas.
 func ScaleRC(name, ns string, replicas int, restClient *client.Client) (*api.ReplicationController, error) {
-	scaler, err := kubectl.ScalerFor("ReplicationController", kubectl.NewScalerClient(restClient))
+	scaler, err := kubectl.ScalerFor(api.Kind("ReplicationController"), restClient)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +248,8 @@ func StartPods(numPods int, host string, restClient *client.Client) error {
 		glog.Infof("StartPods took %v with numPods %d", time.Since(start), numPods)
 	}()
 	hostField := fields.OneTermEqualSelector(client.PodHost, host)
-	pods, err := restClient.Pods(TestNS).List(labels.Everything(), hostField)
+	options := api.ListOptions{FieldSelector: hostField}
+	pods, err := restClient.Pods(TestNS).List(options)
 	if err != nil || len(pods.Items) == numPods {
 		return err
 	}
@@ -268,29 +275,9 @@ func StartPods(numPods int, host string, restClient *client.Client) error {
 
 // TODO: Merge this into startMasterOrDie.
 func RunAMaster(t *testing.T) (*master.Master, *httptest.Server) {
-	etcdClient := NewEtcdClient()
-	etcdStorage, err := master.NewEtcdStorage(etcdClient, latest.InterfacesFor, testapi.Version(), etcdtest.PathPrefix())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	expEtcdStorage, err := master.NewEtcdStorage(etcdClient, explatest.InterfacesFor, explatest.Version, etcdtest.PathPrefix())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	m := master.New(&master.Config{
-		DatabaseStorage:    etcdStorage,
-		ExpDatabaseStorage: expEtcdStorage,
-		KubeletClient:      client.FakeKubeletClient{},
-		EnableLogsSupport:  false,
-		EnableProfiling:    true,
-		EnableUISupport:    false,
-		APIPrefix:          "/api",
-		ExpAPIPrefix:       "/experimental",
-		EnableExp:          true,
-		Authorizer:         apiserver.NewAlwaysAllowAuthorizer(),
-		AdmissionControl:   admit.NewAlwaysAdmit(),
-	})
+	masterConfig := NewMasterConfig()
+	masterConfig.EnableProfiling = true
+	m := master.New(masterConfig)
 
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)

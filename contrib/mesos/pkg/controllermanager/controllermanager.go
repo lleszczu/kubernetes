@@ -19,24 +19,30 @@ package controllermanager
 import (
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"net/http"
 	"strconv"
+	"time"
 
-	"k8s.io/kubernetes/cmd/kube-controller-manager/app"
+	kubecontrollermanager "k8s.io/kubernetes/cmd/kube-controller-manager/app"
+	"k8s.io/kubernetes/contrib/mesos/pkg/node"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
 	clientcmdapi "k8s.io/kubernetes/pkg/client/unversioned/clientcmd/api"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/mesos"
+	"k8s.io/kubernetes/pkg/controller"
+	"k8s.io/kubernetes/pkg/controller/daemon"
 	kendpoint "k8s.io/kubernetes/pkg/controller/endpoint"
-	"k8s.io/kubernetes/pkg/controller/namespace"
-	"k8s.io/kubernetes/pkg/controller/node"
-	"k8s.io/kubernetes/pkg/controller/persistentvolume"
-	"k8s.io/kubernetes/pkg/controller/replication"
-	"k8s.io/kubernetes/pkg/controller/resourcequota"
-	"k8s.io/kubernetes/pkg/controller/route"
-	"k8s.io/kubernetes/pkg/controller/service"
+	namespacecontroller "k8s.io/kubernetes/pkg/controller/namespace"
+	nodecontroller "k8s.io/kubernetes/pkg/controller/node"
+	persistentvolumecontroller "k8s.io/kubernetes/pkg/controller/persistentvolume"
+	replicationcontroller "k8s.io/kubernetes/pkg/controller/replication"
+	resourcequotacontroller "k8s.io/kubernetes/pkg/controller/resourcequota"
+	routecontroller "k8s.io/kubernetes/pkg/controller/route"
+	servicecontroller "k8s.io/kubernetes/pkg/controller/service"
 	"k8s.io/kubernetes/pkg/controller/serviceaccount"
 	"k8s.io/kubernetes/pkg/healthz"
 	"k8s.io/kubernetes/pkg/util"
@@ -51,14 +57,14 @@ import (
 
 // CMServer is the main context object for the controller manager.
 type CMServer struct {
-	*app.CMServer
+	*kubecontrollermanager.CMServer
 	UseHostPortEndpoints bool
 }
 
 // NewCMServer creates a new CMServer with a default config.
 func NewCMServer() *CMServer {
 	s := &CMServer{
-		CMServer: app.NewCMServer(),
+		CMServer: kubecontrollermanager.NewCMServer(),
 	}
 	s.CloudProvider = mesos.ProviderName
 	s.UseHostPortEndpoints = true
@@ -69,6 +75,11 @@ func NewCMServer() *CMServer {
 func (s *CMServer) AddFlags(fs *pflag.FlagSet) {
 	s.CMServer.AddFlags(fs)
 	fs.BoolVar(&s.UseHostPortEndpoints, "host_port_endpoints", s.UseHostPortEndpoints, "Map service endpoints to hostIP:hostPort instead of podIP:containerPort. Default true.")
+}
+
+func (s *CMServer) resyncPeriod() time.Duration {
+	factor := rand.Float64() + 1
+	return time.Duration(float64(time.Hour) * 12.0 * factor)
 }
 
 func (s *CMServer) Run(_ []string) error {
@@ -110,8 +121,11 @@ func (s *CMServer) Run(_ []string) error {
 	endpoints := s.createEndpointController(kubeClient)
 	go endpoints.Run(s.ConcurrentEndpointSyncs, util.NeverStop)
 
-	controllerManager := replicationcontroller.NewReplicationManager(kubeClient, replicationcontroller.BurstReplicas)
-	go controllerManager.Run(s.ConcurrentRCSyncs, util.NeverStop)
+	go replicationcontroller.NewReplicationManager(kubeClient, s.resyncPeriod, replicationcontroller.BurstReplicas).
+		Run(s.ConcurrentRCSyncs, util.NeverStop)
+
+	go daemon.NewDaemonSetsController(kubeClient, s.resyncPeriod).
+		Run(s.ConcurrentDSCSyncs, util.NeverStop)
 
 	//TODO(jdef) should eventually support more cloud providers here
 	if s.CloudProvider != mesos.ProviderName {
@@ -124,8 +138,14 @@ func (s *CMServer) Run(_ []string) error {
 
 	nodeController := nodecontroller.NewNodeController(cloud, kubeClient,
 		s.PodEvictionTimeout, util.NewTokenBucketRateLimiter(s.DeletingPodsQps, s.DeletingPodsBurst),
+		util.NewTokenBucketRateLimiter(s.DeletingPodsQps, s.DeletingPodsBurst),
 		s.NodeMonitorGracePeriod, s.NodeStartupGracePeriod, s.NodeMonitorPeriod, (*net.IPNet)(&s.ClusterCIDR), s.AllocateNodeCIDRs)
 	nodeController.Run(s.NodeSyncPeriod)
+
+	nodeStatusUpdaterController := node.NewStatusUpdater(kubeClient, s.NodeMonitorPeriod, time.Now)
+	if err := nodeStatusUpdaterController.Run(util.NeverStop); err != nil {
+		glog.Fatalf("Failed to start node status update controller: %v", err)
+	}
 
 	serviceController := servicecontroller.New(cloud, kubeClient, s.ClusterName)
 	if err := serviceController.Run(s.ServiceSyncPeriod, s.NodeSyncPeriod); err != nil {
@@ -141,19 +161,34 @@ func (s *CMServer) Run(_ []string) error {
 		routeController.Run(s.NodeSyncPeriod)
 	}
 
-	resourceQuotaController := resourcequotacontroller.NewResourceQuotaController(kubeClient)
-	resourceQuotaController.Run(s.ResourceQuotaSyncPeriod)
+	go resourcequotacontroller.NewResourceQuotaController(
+		kubeClient, controller.StaticResyncPeriodFunc(s.ResourceQuotaSyncPeriod)).Run(s.ConcurrentResourceQuotaSyncs, util.NeverStop)
 
-	namespaceController := namespacecontroller.NewNamespaceController(kubeClient, s.NamespaceSyncPeriod)
+	namespaceController := namespacecontroller.NewNamespaceController(kubeClient, &unversioned.APIVersions{}, s.NamespaceSyncPeriod)
 	namespaceController.Run()
 
-	pvclaimBinder := volumeclaimbinder.NewPersistentVolumeClaimBinder(kubeClient, s.PVClaimBinderSyncPeriod)
+	volumePlugins := kubecontrollermanager.ProbeRecyclableVolumePlugins(s.VolumeConfigFlags)
+	provisioner, err := kubecontrollermanager.NewVolumeProvisioner(cloud, s.VolumeConfigFlags)
+	if err != nil {
+		glog.Fatal("A Provisioner could not be created, but one was expected. Provisioning will not work. This functionality is considered an early Alpha version.")
+	}
+
+	pvclaimBinder := persistentvolumecontroller.NewPersistentVolumeClaimBinder(kubeClient, s.PVClaimBinderSyncPeriod)
 	pvclaimBinder.Run()
-	pvRecycler, err := volumeclaimbinder.NewPersistentVolumeRecycler(kubeClient, s.PVClaimBinderSyncPeriod, app.ProbeRecyclableVolumePlugins())
+
+	pvRecycler, err := persistentvolumecontroller.NewPersistentVolumeRecycler(kubeClient, s.PVClaimBinderSyncPeriod, kubecontrollermanager.ProbeRecyclableVolumePlugins(s.VolumeConfigFlags), cloud)
 	if err != nil {
 		glog.Fatalf("Failed to start persistent volume recycler: %+v", err)
 	}
 	pvRecycler.Run()
+
+	if provisioner != nil {
+		pvController, err := persistentvolumecontroller.NewPersistentVolumeProvisionerController(persistentvolumecontroller.NewControllerClient(kubeClient), s.PVClaimBinderSyncPeriod, volumePlugins, provisioner, cloud)
+		if err != nil {
+			glog.Fatalf("Failed to start persistent volume provisioner controller: %+v", err)
+		}
+		pvController.Run()
+	}
 
 	var rootCA []byte
 
@@ -198,6 +233,6 @@ func (s *CMServer) createEndpointController(client *client.Client) kmendpoint.En
 		return kmendpoint.NewEndpointController(client)
 	}
 	glog.V(2).Infof("Creating podIP:containerPort endpoint controller")
-	stockEndpointController := kendpoint.NewEndpointController(client)
+	stockEndpointController := kendpoint.NewEndpointController(client, s.resyncPeriod)
 	return stockEndpointController
 }

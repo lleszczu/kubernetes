@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/sets"
 )
 
 type qitem struct {
@@ -277,13 +277,13 @@ func (f *DelayFIFO) List() []UniqueID {
 	return list
 }
 
-// ContainedIDs returns a util.StringSet containing all IDs of the stored items.
+// ContainedIDs returns a stringset.StringSet containing all IDs of the stored items.
 // This is a snapshot of a moment in time, and one should keep in mind that
 // other go routines can add or remove items after you call this.
-func (c *DelayFIFO) ContainedIDs() util.StringSet {
+func (c *DelayFIFO) ContainedIDs() sets.String {
 	c.rlock()
 	defer c.runlock()
-	set := util.StringSet{}
+	set := sets.String{}
 	for id := range c.items {
 		set.Insert(id)
 	}
@@ -302,12 +302,18 @@ func (f *DelayFIFO) Get(id string) (UniqueID, bool) {
 
 // Variant of DelayQueue.Pop() for UniqueDelayed items
 func (q *DelayFIFO) Await(timeout time.Duration) UniqueID {
-	cancel := make(chan struct{})
-	ch := make(chan interface{}, 1)
+	var (
+		cancel = make(chan struct{})
+		ch     = make(chan interface{}, 1)
+		t      = time.NewTimer(timeout)
+	)
+	defer t.Stop()
+
 	go func() { ch <- q.pop(cancel) }()
+
 	var x interface{}
 	select {
-	case <-time.After(timeout):
+	case <-t.C:
 		close(cancel)
 		x = <-ch
 	case x = <-ch:
@@ -319,13 +325,19 @@ func (q *DelayFIFO) Await(timeout time.Duration) UniqueID {
 	return nil
 }
 
-// Variant of DelayQueue.Pop() for UniqueDelayed items
-func (q *DelayFIFO) Pop() UniqueID {
-	return q.pop(nil).(UniqueID)
+// Pop blocks until either there is an item available to dequeue or else the specified
+// cancel chan is closed. Callers that have no interest in providing a cancel chan
+// should specify nil, or else WithoutCancel() (for readability).
+func (q *DelayFIFO) Pop(cancel <-chan struct{}) UniqueID {
+	x := q.pop(cancel)
+	if x == nil {
+		return nil
+	}
+	return x.(UniqueID)
 }
 
 // variant of DelayQueue.Pop that implements optional cancellation
-func (q *DelayFIFO) pop(cancel chan struct{}) interface{} {
+func (q *DelayFIFO) pop(cancel <-chan struct{}) interface{} {
 	next := func() *qitem {
 		q.lock()
 		defer q.unlock()

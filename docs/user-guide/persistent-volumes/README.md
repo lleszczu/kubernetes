@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/user-guide/persistent-volumes/README.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/user-guide/persistent-volumes/README.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -122,8 +122,7 @@ $ curl 10.0.0.241:3000
 I love Kubernetes storage!
 ```
 
-Hopefully this simple guide is enough to get you started with PersistentVolumes.  If you have any questions, join
-[`#google-containers`](https://botbot.me/freenode/google-containers/) on IRC and ask!
+Hopefully this simple guide is enough to get you started with PersistentVolumes.  If you have any questions, join the team on [Slack](../../troubleshooting.md#slack) and ask!
 
 Enjoy!
 

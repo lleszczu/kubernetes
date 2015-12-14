@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var (
@@ -59,7 +60,7 @@ const (
 	downloadDirName = "_output/downloads"
 	tarDirName      = "server"
 	tempDirName     = "upgrade-e2e-temp-dir"
-	minMinionCount  = 2
+	minNodeCount    = 2
 )
 
 var (
@@ -84,6 +85,7 @@ type TestResult struct {
 type ResultsByTest map[string]TestResult
 
 func main() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	flag.Parse()
 
 	if *isup {
@@ -176,12 +178,14 @@ func Up() bool {
 		}
 	}
 
+	// Enable deployments for e2e tests.
+	os.Setenv("KUBE_ENABLE_DEPLOYMENTS", "true")
 	return finishRunning("up", exec.Command(path.Join(*root, "hack/e2e-internal/e2e-up.sh")))
 }
 
 // Ensure that the cluster is large engough to run the e2e tests.
 func ValidateClusterSize() {
-	// Check that there are at least minMinionCount minions running
+	// Check that there are at least minNodeCount nodes running
 	cmd := exec.Command(path.Join(*root, "hack/e2e-internal/e2e-cluster-size.sh"))
 	if *verbose {
 		cmd.Stderr = os.Stderr
@@ -196,8 +200,8 @@ func ValidateClusterSize() {
 		log.Fatalf("Could not count number of nodes to validate cluster size (%s)", err)
 	}
 
-	if numNodes < minMinionCount {
-		log.Fatalf("Cluster size (%d) is too small to run e2e tests.  %d Minions are required.", numNodes, minMinionCount)
+	if numNodes < minNodeCount {
+		log.Fatalf("Cluster size (%d) is too small to run e2e tests.  %d Nodes are required.", numNodes, minNodeCount)
 	}
 }
 
@@ -297,6 +301,10 @@ func finishRunning(stepName string, cmd *exec.Cmd) bool {
 		cmd.Stderr = os.Stderr
 	}
 	log.Printf("Running: %v", stepName)
+	defer func(start time.Time) {
+		log.Printf("Step '%s' finished in %s", stepName, time.Since(start))
+	}(time.Now())
+
 	if err := cmd.Run(); err != nil {
 		log.Printf("Error running %v: %v", stepName, err)
 		return false

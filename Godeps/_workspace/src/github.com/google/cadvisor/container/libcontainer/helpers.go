@@ -17,11 +17,11 @@ package libcontainer
 import (
 	"bufio"
 	"fmt"
-	"net"
-	"os/exec"
+	"io/ioutil"
+	"os"
 	"path"
 	"regexp"
-	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,8 +29,6 @@ import (
 	"github.com/docker/libcontainer/cgroups"
 	"github.com/golang/glog"
 	info "github.com/google/cadvisor/info/v1"
-	"github.com/google/cadvisor/utils/sysinfo"
-	"github.com/vishvananda/netns"
 )
 
 type CgroupSubsystems struct {
@@ -82,7 +80,7 @@ var supportedSubsystems map[string]struct{} = map[string]struct{}{
 }
 
 // Get cgroup and networking stats of the specified container
-func GetStats(cgroupManager cgroups.Manager, networkInterfaces []string, pid int) (*info.ContainerStats, error) {
+func GetStats(cgroupManager cgroups.Manager, rootFs string, pid int) (*info.ContainerStats, error) {
 	cgroupStats, err := cgroupManager.GetStats()
 	if err != nil {
 		return nil, err
@@ -92,25 +90,29 @@ func GetStats(cgroupManager cgroups.Manager, networkInterfaces []string, pid int
 	}
 	stats := toContainerStats(libcontainerStats)
 
-	// TODO(rjnagal): Use networking stats directly from libcontainer.
-	stats.Network.Interfaces = make([]info.InterfaceStats, len(networkInterfaces))
-	for i := range networkInterfaces {
-		interfaceStats, err := sysinfo.GetNetworkStats(networkInterfaces[i])
-		if err != nil {
-			return stats, err
-		}
-		stats.Network.Interfaces[i] = interfaceStats
-	}
-
-	// If we know the pid & we haven't discovered any network interfaces yet
-	// try the network namespace.
-	if pid > 0 && len(stats.Network.Interfaces) == 0 {
-		nsStats, err := networkStatsFromNs(pid)
+	// If we know the pid then get network stats from /proc/<pid>/net/dev
+	if pid > 0 {
+		netStats, err := networkStatsFromProc(rootFs, pid)
 		if err != nil {
 			glog.V(2).Infof("Unable to get network stats from pid %d: %v", pid, err)
 		} else {
-			stats.Network.Interfaces = append(stats.Network.Interfaces, nsStats...)
+			stats.Network.Interfaces = append(stats.Network.Interfaces, netStats...)
 		}
+
+		// Commenting out to disable: too CPU intensive
+		/*t, err := tcpStatsFromProc(rootFs, pid, "net/tcp")
+		if err != nil {
+			glog.V(2).Infof("Unable to get tcp stats from pid %d: %v", pid, err)
+		} else {
+			stats.Network.Tcp = t
+		}
+
+		t6, err := tcpStatsFromProc(rootFs, pid, "net/tcp6")
+		if err != nil {
+			glog.V(2).Infof("Unable to get tcp6 stats from pid %d: %v", pid, err)
+		} else {
+			stats.Network.Tcp6 = t6
+		}*/
 	}
 
 	// For backwards compatibility.
@@ -121,72 +123,99 @@ func GetStats(cgroupManager cgroups.Manager, networkInterfaces []string, pid int
 	return stats, nil
 }
 
-func networkStatsFromNs(pid int) ([]info.InterfaceStats, error) {
-	// Lock the OS Thread so we only change the ns for this thread exclusively
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+func networkStatsFromProc(rootFs string, pid int) ([]info.InterfaceStats, error) {
+	netStatsFile := path.Join(rootFs, "proc", strconv.Itoa(pid), "/net/dev")
+
+	ifaceStats, err := scanInterfaceStats(netStatsFile)
+	if err != nil {
+		return []info.InterfaceStats{}, fmt.Errorf("couldn't read network stats: %v", err)
+	}
+
+	return ifaceStats, nil
+}
+
+var (
+	ignoredDevicePrefixes = []string{"lo", "veth", "docker"}
+)
+
+func isIgnoredDevice(ifName string) bool {
+	for _, prefix := range ignoredDevicePrefixes {
+		if strings.HasPrefix(strings.ToLower(ifName), prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+const netstatsLine = `%s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d`
+
+func scanInterfaceStats(netStatsFile string) ([]info.InterfaceStats, error) {
+	var (
+		bkt uint64
+	)
 
 	stats := []info.InterfaceStats{}
 
-	// Save the current network namespace
-	origns, _ := netns.Get()
-	defer origns.Close()
-
-	// Switch to the pid netns
-	pidns, err := netns.GetFromPid(pid)
-	defer pidns.Close()
+	file, err := os.Open(netStatsFile)
 	if err != nil {
-		return stats, nil
+		return stats, fmt.Errorf("failure opening %s: %v", netStatsFile, err)
 	}
-	netns.Set(pidns)
+	defer file.Close()
 
-	// Defer setting back to original ns
-	defer netns.Set(origns)
+	scanner := bufio.NewScanner(file)
 
-	ifaceStats, err := scanInterfaceStats()
-	if err != nil {
-		return stats, fmt.Errorf("couldn't read network stats: %v", err)
-	}
+	for scanner.Scan() {
+		line := scanner.Text()
+		line = strings.Replace(line, ":", "", -1)
 
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return stats, fmt.Errorf("cannot find interfaces: %v", err)
-	}
+		i := info.InterfaceStats{}
 
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp != 0 && iface.Flags&net.FlagLoopback == 0 {
-			if s, ok := ifaceStats[iface.Name]; ok {
-				stats = append(stats, s)
-			}
+		_, err := fmt.Sscanf(line, netstatsLine,
+			&i.Name, &i.RxBytes, &i.RxPackets, &i.RxErrors, &i.RxDropped, &bkt, &bkt, &bkt,
+			&bkt, &i.TxBytes, &i.TxPackets, &i.TxErrors, &i.TxDropped, &bkt, &bkt, &bkt, &bkt)
+
+		if err == nil && !isIgnoredDevice(i.Name) {
+			stats = append(stats, i)
 		}
 	}
 
 	return stats, nil
 }
 
-// Borrowed from libnetwork Stats - https://github.com/docker/libnetwork/blob/master/sandbox/interface_linux.go
-// In older kernels (like the one in Centos 6.6 distro) sysctl does not have netns support. Therefore
-// we cannot gather the statistics from /sys/class/net/<dev>/statistics/<counter> files. Per-netns stats
-// are naturally found in /proc/net/dev in kernels which support netns (ifconfig relyes on that).
-const (
-	netStatsFile = "/proc/net/dev"
-)
+func tcpStatsFromProc(rootFs string, pid int, file string) (info.TcpStat, error) {
+	tcpStatsFile := path.Join(rootFs, "proc", strconv.Itoa(pid), file)
 
-func scanInterfaceStats() (map[string]info.InterfaceStats, error) {
-	re := regexp.MustCompile("[  ]*(.+):([  ]+[0-9]+){16}")
-
-	var (
-		bkt uint64
-	)
-
-	stats := map[string]info.InterfaceStats{}
-
-	// For some reason ioutil.ReadFile(netStatsFile) reads the file in
-	// the default netns when this code is invoked from docker.
-	// Executing "cat <netStatsFile>" works as expected.
-	data, err := exec.Command("cat", netStatsFile).Output()
+	tcpStats, err := scanTcpStats(tcpStatsFile)
 	if err != nil {
-		return stats, fmt.Errorf("failure opening %s: %v", netStatsFile, err)
+		return tcpStats, fmt.Errorf("couldn't read tcp stats: %v", err)
+	}
+
+	return tcpStats, nil
+}
+
+func scanTcpStats(tcpStatsFile string) (info.TcpStat, error) {
+
+	var stats info.TcpStat
+
+	data, err := ioutil.ReadFile(tcpStatsFile)
+	if err != nil {
+		return stats, fmt.Errorf("failure opening %s: %v", tcpStatsFile, err)
+	}
+
+	tcpStatLineRE, _ := regexp.Compile("[0-9:].*")
+
+	tcpStateMap := map[string]uint64{
+		"01": 0, //ESTABLISHED
+		"02": 0, //SYN_SENT
+		"03": 0, //SYN_RECV
+		"04": 0, //FIN_WAIT1
+		"05": 0, //FIN_WAIT2
+		"06": 0, //TIME_WAIT
+		"07": 0, //CLOSE
+		"08": 0, //CLOSE_WAIT
+		"09": 0, //LAST_ACK
+		"0A": 0, //LISTEN
+		"0B": 0, //CLOSING
 	}
 
 	reader := strings.NewReader(string(data))
@@ -195,22 +224,31 @@ func scanInterfaceStats() (map[string]info.InterfaceStats, error) {
 	scanner.Split(bufio.ScanLines)
 
 	for scanner.Scan() {
+
 		line := scanner.Text()
-		if re.MatchString(line) {
-			line = strings.Replace(line, ":", "", -1)
+		//skip header
+		matched := tcpStatLineRE.MatchString(line)
 
-			i := info.InterfaceStats{}
-
-			_, err := fmt.Sscanf(line, "%s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
-				&i.Name, &i.RxBytes, &i.RxPackets, &i.RxErrors, &i.RxDropped, &bkt, &bkt, &bkt,
-				&bkt, &i.TxBytes, &i.TxPackets, &i.TxErrors, &i.TxDropped, &bkt, &bkt, &bkt, &bkt)
-
-			if err != nil {
-				return stats, fmt.Errorf("failure opening %s: %v", netStatsFile, err)
-			}
-
-			stats[i.Name] = i
+		if matched {
+			state := strings.Fields(line)
+			//#file header tcp state is the 4 filed:
+			//sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt  uid timeout inode
+			tcpStateMap[state[3]]++
 		}
+	}
+
+	stats = info.TcpStat{
+		Established: tcpStateMap["01"],
+		SynSent:     tcpStateMap["02"],
+		SynRecv:     tcpStateMap["03"],
+		FinWait1:    tcpStateMap["04"],
+		FinWait2:    tcpStateMap["05"],
+		TimeWait:    tcpStateMap["06"],
+		Close:       tcpStateMap["07"],
+		CloseWait:   tcpStateMap["08"],
+		LastAck:     tcpStateMap["09"],
+		Listen:      tcpStateMap["0A"],
+		Closing:     tcpStateMap["0B"],
 	}
 
 	return stats, nil
@@ -304,7 +342,8 @@ func toContainerStats1(s *cgroups.Stats, ret *info.ContainerStats) {
 }
 
 func toContainerStats2(s *cgroups.Stats, ret *info.ContainerStats) {
-	ret.Memory.Usage = s.MemoryStats.Usage
+	ret.Memory.Usage = s.MemoryStats.Usage.Usage
+	ret.Memory.Failcnt = s.MemoryStats.Usage.Failcnt
 	if v, ok := s.MemoryStats.Stats["pgfault"]; ok {
 		ret.Memory.ContainerData.Pgfault = v
 		ret.Memory.HierarchicalData.Pgfault = v

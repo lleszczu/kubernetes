@@ -27,7 +27,7 @@ const exampleToken = "EXAMPLE"
 
 const exampleLineStart = "<!-- BEGIN MUNGE: EXAMPLE"
 
-var exampleMungeTagRE = regexp.MustCompile(beginMungeTag(fmt.Sprintf("%s %s", exampleToken, `(([^ ])*.(yaml|json))`)))
+var exampleMungeTagRE = regexp.MustCompile(beginMungeTag(fmt.Sprintf("%s %s", exampleToken, `(([^ ])*[.]([^.]*))`)))
 
 // syncExamples updates all examples in markdown file.
 //
@@ -43,7 +43,7 @@ var exampleMungeTagRE = regexp.MustCompile(beginMungeTag(fmt.Sprintf("%s %s", ex
 //    bar:
 // ```
 //
-// [Download example](../../examples/guestbook/frontend-controller.yaml)
+// [Download example](../../examples/guestbook/frontend-controller.yaml?raw=true)
 // <!-- END MUNGE: EXAMPLE -->
 func syncExamples(filePath string, mlines mungeLines) (mungeLines, error) {
 	var err error
@@ -77,7 +77,14 @@ func syncExamples(filePath string, mlines mungeLines) (mungeLines, error) {
 	}
 	// update all example Tags
 	for _, tag := range exampleTags {
-		example, err := exampleContent(filePath, tag.linkText, tag.fileType)
+		ft := ""
+		if tag.fileType == "json" {
+			ft = "json"
+		}
+		if tag.fileType == "yaml" {
+			ft = "yaml"
+		}
+		example, err := exampleContent(filePath, tag.linkText, ft)
 		if err != nil {
 			return mlines, err
 		}
@@ -108,7 +115,7 @@ func exampleContent(filePath, linkPath, fileType string) (mungeLines, error) {
 
 	// remove leading and trailing spaces and newlines
 	trimmedFileContent := strings.TrimSpace(string(dat))
-	content := fmt.Sprintf("\n```%s\n%s\n```\n\n[Download example](%s)", fileType, trimmedFileContent, fileRel)
+	content := fmt.Sprintf("\n```%s\n%s\n```\n\n[Download example](%s?raw=true)", fileType, trimmedFileContent, fileRel)
 	out := getMungeLines(content)
 	return out, nil
 }

@@ -22,11 +22,10 @@ import (
 
 	"github.com/coreos/go-etcd/etcd"
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/api/latest"
 	"k8s.io/kubernetes/pkg/api/testapi"
-	"k8s.io/kubernetes/pkg/master"
 	"k8s.io/kubernetes/pkg/storage"
-	"k8s.io/kubernetes/pkg/tools/etcdtest"
+	etcdstorage "k8s.io/kubernetes/pkg/storage/etcd"
+	"k8s.io/kubernetes/pkg/storage/etcd/etcdtest"
 )
 
 // If you need to start an etcd instance by hand, you also need to insert a key
@@ -40,8 +39,15 @@ func NewEtcdClient() *etcd.Client {
 	return etcd.NewClient([]string{})
 }
 
-func NewEtcdStorage() (storage.Interface, error) {
-	return master.NewEtcdStorage(NewEtcdClient(), latest.InterfacesFor, testapi.Version(), etcdtest.PathPrefix())
+func NewEtcdStorage() storage.Interface {
+	return etcdstorage.NewEtcdStorage(NewEtcdClient(), testapi.Default.Codec(), etcdtest.PathPrefix())
+}
+
+func NewExtensionsEtcdStorage(client *etcd.Client) storage.Interface {
+	if client == nil {
+		client = NewEtcdClient()
+	}
+	return etcdstorage.NewEtcdStorage(client, testapi.Extensions.Codec(), etcdtest.PathPrefix())
 }
 
 func RequireEtcd() {

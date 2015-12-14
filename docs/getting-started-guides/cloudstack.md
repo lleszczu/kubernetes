@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/getting-started-guides/cloudstack.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/getting-started-guides/cloudstack.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -108,7 +108,7 @@ Once the playbook as finished, it will print out the IP of the Kubernetes master
 
 SSH to it using the key that was created and using the _core_ user and you can list the machines in your cluster:
 
-    $ ssh -i ~/.ssh/id_rsa_k8s core@<maste IP>
+    $ ssh -i ~/.ssh/id_rsa_k8s core@<master IP>
     $ fleetctl list-machines
     MACHINE		IP		       METADATA
     a017c422...	<node #1 IP>   role=node

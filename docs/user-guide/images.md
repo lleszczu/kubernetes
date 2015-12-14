@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/user-guide/images.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/user-guide/images.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -55,10 +55,13 @@ The `image` property of a container supports the same syntax as the `docker` com
 
 ## Updating Images
 
-The default pull policy is `PullIfNotPresent` which causes the Kubelet to not
+The default pull policy is `IfNotPresent` which causes the Kubelet to not
 pull an image if it already exists. If you would like to always force a pull
-you must set a pull image policy of `PullAlways` or specify a `:latest` tag on
+you must set a pull image policy of `Always` or specify a `:latest` tag on
 your image.
+
+If you did not specify tag of your image, it will be assumed as `:latest`, with
+pull image policy of `Always` correspondingly.
 
 ## Using a Private Registry
 
@@ -88,7 +91,7 @@ use the full image name (e.g. gcr.io/my_project/image:tag).
 
 All pods in a cluster will have read access to images in this registry.
 
-The kubelet kubelet will authenticate to GCR using the instance's
+The kubelet will authenticate to GCR using the instance's
 Google service account.  The service account on the instance
 will have a `https://www.googleapis.com/auth/devstorage.read_only`,
 so it can pull from the project's GCR, but not push.
@@ -109,8 +112,9 @@ Here are the recommended steps to configuring your nodes to use a private regist
 example, run these on your desktop/laptop:
    1. run `docker login [server]` for each set of credentials you want to use.
    1. view `$HOME/.dockercfg` in an editor to ensure it contains just the credentials you want to use.
-   1. get a list of your nodes
-      - for example: `nodes=$(kubectl get nodes -o template --template='{{range.items}}{{.metadata.name}} {{end}}')`
+   1. get a list of your nodes, for example:
+      - if you want the names: `nodes=$(kubectl get nodes -o jsonpath='{range.items[*].metadata}{.name} {end}')`
+      - if you want to get the IPs: `nodes=$(kubectl get nodes -o jsonpath='{range .items[*].status.addresses[?(@.type=="ExternalIP")]}{.address} {end}')`
    1. copy your local `.dockercfg` to the home directory of root on each node.
       - for example: `for n in $nodes; do scp ~/.dockercfg root@$n:/root/.dockercfg; done`
 
@@ -126,8 +130,8 @@ spec:
   containers:
     - name: uses-private-image
       image: $PRIVATE_IMAGE_NAME
+      imagePullPolicy: Always
       command: [ "echo", "SUCCESS" ]
-  imagePullPolicy: Always
 EOF
 $ kubectl create -f /tmp/private-image-test-1.yaml
 pods/private-image-test-1

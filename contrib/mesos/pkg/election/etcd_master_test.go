@@ -19,16 +19,19 @@ package election
 import (
 	"testing"
 
-	"github.com/coreos/go-etcd/etcd"
-	"k8s.io/kubernetes/pkg/tools"
+	etcdtesting "k8s.io/kubernetes/pkg/storage/etcd/testing"
 	"k8s.io/kubernetes/pkg/watch"
 )
 
 func TestEtcdMasterOther(t *testing.T) {
+	server := etcdtesting.NewEtcdTestClientServer(t)
+	defer server.Terminate(t)
+
 	path := "foo"
-	etcd := tools.NewFakeEtcdClient(t)
-	etcd.Set(path, "baz", 0)
-	master := NewEtcdMasterElector(etcd)
+	if _, err := server.Client.Set(path, "baz", 0); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	master := NewEtcdMasterElector(server.Client)
 	w := master.Elect(path, "bar")
 	result := <-w.ResultChan()
 	if result.Type != watch.Modified || result.Object.(Master) != "baz" {
@@ -38,18 +41,11 @@ func TestEtcdMasterOther(t *testing.T) {
 }
 
 func TestEtcdMasterNoOther(t *testing.T) {
+	server := etcdtesting.NewEtcdTestClientServer(t)
+	defer server.Terminate(t)
+
 	path := "foo"
-	e := tools.NewFakeEtcdClient(t)
-	e.TestIndex = true
-	e.Data["foo"] = tools.EtcdResponseWithError{
-		R: &etcd.Response{
-			Node: nil,
-		},
-		E: &etcd.EtcdError{
-			ErrorCode: tools.EtcdErrorCodeNotFound,
-		},
-	}
-	master := NewEtcdMasterElector(e)
+	master := NewEtcdMasterElector(server.Client)
 	w := master.Elect(path, "bar")
 	result := <-w.ResultChan()
 	if result.Type != watch.Modified || result.Object.(Master) != "bar" {
@@ -59,40 +55,20 @@ func TestEtcdMasterNoOther(t *testing.T) {
 }
 
 func TestEtcdMasterNoOtherThenConflict(t *testing.T) {
+	server := etcdtesting.NewEtcdTestClientServer(t)
+	defer server.Terminate(t)
+
 	path := "foo"
-	e := tools.NewFakeEtcdClient(t)
-	e.TestIndex = true
-	// Ok, so we set up a chain of responses from etcd:
-	//   1) Nothing there
-	//   2) conflict (someone else wrote)
-	//   3) new value (the data they wrote)
-	empty := tools.EtcdResponseWithError{
-		R: &etcd.Response{
-			Node: nil,
-		},
-		E: &etcd.EtcdError{
-			ErrorCode: tools.EtcdErrorCodeNotFound,
-		},
-	}
-	empty.N = &tools.EtcdResponseWithError{
-		R: &etcd.Response{},
-		E: &etcd.EtcdError{
-			ErrorCode: tools.EtcdErrorCodeNodeExist,
-		},
-	}
-	empty.N.N = &tools.EtcdResponseWithError{
-		R: &etcd.Response{
-			Node: &etcd.Node{
-				Value: "baz",
-			},
-		},
-	}
-	e.Data["foo"] = empty
-	master := NewEtcdMasterElector(e)
+	master := NewEtcdMasterElector(server.Client)
+	leader := NewEtcdMasterElector(server.Client)
+
+	w_ldr := leader.Elect(path, "baz")
+	result := <-w_ldr.ResultChan()
 	w := master.Elect(path, "bar")
-	result := <-w.ResultChan()
-	if result.Type != watch.Modified || result.Object.(Master) != "bar" {
+	result = <-w.ResultChan()
+	if result.Type != watch.Modified || result.Object.(Master) != "baz" {
 		t.Errorf("unexpected event: %#v", result)
 	}
 	w.Stop()
+	w_ldr.Stop()
 }

@@ -32,6 +32,7 @@ kube::golang::server_targets() {
     cmd/kube-apiserver
     cmd/kube-controller-manager
     cmd/kubelet
+    cmd/kubemark
     cmd/hyperkube
     cmd/linkcheck
     plugin/cmd/kube-scheduler
@@ -49,6 +50,7 @@ readonly KUBE_SERVER_BINARIES=("${KUBE_SERVER_TARGETS[@]##*/}")
 # The server platform we are building on.
 readonly KUBE_SERVER_PLATFORMS=(
   linux/amd64
+  linux/arm
 )
 
 # The set of client targets that we are building for all platforms
@@ -63,13 +65,14 @@ kube::golang::test_targets() {
   local targets=(
     cmd/integration
     cmd/gendocs
+    cmd/genkubedocs
     cmd/genman
     cmd/mungedocs
     cmd/genbashcomp
     cmd/genconversion
     cmd/gendeepcopy
     cmd/genswaggertypedocs
-    examples/k8petstore/web-server
+    examples/k8petstore/web-server/src
     github.com/onsi/ginkgo/ginkgo
     test/e2e/e2e.test
   )
@@ -86,8 +89,10 @@ readonly KUBE_TEST_BINARIES_WIN=("${KUBE_TEST_BINARIES[@]/%/.exe}")
 readonly KUBE_TEST_PORTABLE=(
   test/images/network-tester/rc.json
   test/images/network-tester/service.json
+  test/kubemark
   hack/e2e.go
   hack/e2e-internal
+  hack/get-build.sh
   hack/ginkgo-e2e.sh
   hack/lib
 )
@@ -107,7 +112,7 @@ readonly KUBE_CLIENT_PLATFORMS=(
 # arbitrary, but is a reasonable splitting point for 2015
 # laptops-versus-not.
 #
-# If you are using boot2docker, the following seems to work (note 
+# If you are using boot2docker, the following seems to work (note
 # that 12000 rounds to 11G):
 #   boot2docker down
 #   VBoxManage modifyvm boot2docker-vm --memory 12000
@@ -125,6 +130,7 @@ readonly KUBE_STATIC_LIBRARIES=(
   kube-apiserver
   kube-controller-manager
   kube-scheduler
+  kube-proxy
 )
 
 kube::golang::is_statically_linked_library() {
@@ -411,9 +417,15 @@ kube::golang::build_binaries_for_platform() {
   done
 }
 
-# Return approximate physical memory in gigabytes.
+# Return approximate physical memory available in gigabytes.
 kube::golang::get_physmem() {
   local mem
+
+  # Linux kernel version >=3.14, in kb
+  if mem=$(grep MemAvailable /proc/meminfo | awk '{ print $2 }'); then
+    echo $(( ${mem} / 1048576 ))
+    return
+  fi
 
   # Linux, in kb
   if mem=$(grep MemTotal /proc/meminfo | awk '{ print $2 }'); then

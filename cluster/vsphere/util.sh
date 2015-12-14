@@ -45,21 +45,21 @@ function detect-master {
 # Detect the information about the minions
 #
 # Assumed vars:
-#   MINION_NAMES
+#   NODE_NAMES
 # Vars set:
-#   KUBE_MINION_IP_ADDRESS (array)
-function detect-minions {
-  KUBE_MINION_IP_ADDRESSES=()
-  for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
-    local minion_ip=$(govc vm.ip ${MINION_NAMES[$i]})
+#   KUBE_NODE_IP_ADDRESS (array)
+function detect-nodes {
+  KUBE_NODE_IP_ADDRESSES=()
+  for (( i=0; i<${#NODE_NAMES[@]}; i++)); do
+    local minion_ip=$(govc vm.ip ${NODE_NAMES[$i]})
     if [[ -z "${minion_ip-}" ]] ; then
-      echo "Did not find ${MINION_NAMES[$i]}" >&2
+      echo "Did not find ${NODE_NAMES[$i]}" >&2
     else
-      echo "Found ${MINION_NAMES[$i]} at ${minion_ip}"
-      KUBE_MINION_IP_ADDRESSES+=("${minion_ip}")
+      echo "Found ${NODE_NAMES[$i]} at ${minion_ip}"
+      KUBE_NODE_IP_ADDRESSES+=("${minion_ip}")
     fi
   done
-  if [[ -z "${KUBE_MINION_IP_ADDRESSES-}" ]]; then
+  if [[ -z "${KUBE_NODE_IP_ADDRESSES-}" ]]; then
     echo "Could not detect Kubernetes minion nodes. Make sure you've launched a cluster with 'kube-up.sh'" >&2
     exit 1
   fi
@@ -123,31 +123,6 @@ function ensure-temp-dir {
   if [[ -z ${KUBE_TEMP-} ]]; then
     KUBE_TEMP=$(mktemp -d -t kubernetes.XXXXXX)
     trap-add 'rm -rf "${KUBE_TEMP}"' EXIT
-  fi
-}
-
-# Verify and find the various tar files that we are going to use on the server.
-#
-# Vars set:
-#   SERVER_BINARY_TAR
-#   SALT_TAR
-function find-release-tars {
-  SERVER_BINARY_TAR="${KUBE_ROOT}/server/kubernetes-server-linux-amd64.tar.gz"
-  if [[ ! -f "$SERVER_BINARY_TAR" ]]; then
-    SERVER_BINARY_TAR="${KUBE_ROOT}/_output/release-tars/kubernetes-server-linux-amd64.tar.gz"
-  fi
-  if [[ ! -f "$SERVER_BINARY_TAR" ]]; then
-    echo "!!! Cannot find kubernetes-server-linux-amd64.tar.gz"
-    exit 1
-  fi
-
-  SALT_TAR="${KUBE_ROOT}/server/kubernetes-salt.tar.gz"
-  if [[ ! -f "$SALT_TAR" ]]; then
-    SALT_TAR="${KUBE_ROOT}/_output/release-tars/kubernetes-salt.tar.gz"
-  fi
-  if [[ ! -f "$SALT_TAR" ]]; then
-    echo "!!! Cannot find kubernetes-salt.tar.gz"
-    exit 1
   fi
 }
 
@@ -250,7 +225,7 @@ function kube-up {
 
   ensure-temp-dir
 
-  gen-kube-basicauth
+  load-or-gen-kube-basicauth
   python "${KUBE_ROOT}/third_party/htpasswd/htpasswd.py" \
     -b -c "${KUBE_TEMP}/htpasswd" "$KUBE_USER" "$KUBE_PASSWORD"
   local htpasswd
@@ -275,6 +250,7 @@ function kube-up {
     echo "readonly SERVER_BINARY_TAR='${SERVER_BINARY_TAR##*/}'"
     echo "readonly SALT_TAR='${SALT_TAR##*/}'"
     echo "readonly MASTER_HTPASSWD='${htpasswd}'"
+    echo "readonly E2E_STORAGE_TEST_ENVIRONMENT='${E2E_STORAGE_TEST_ENVIRONMENT:-}'"
     grep -v "^#" "${KUBE_ROOT}/cluster/vsphere/templates/create-dynamic-salt-files.sh"
     grep -v "^#" "${KUBE_ROOT}/cluster/vsphere/templates/install-release.sh"
     grep -v "^#" "${KUBE_ROOT}/cluster/vsphere/templates/salt-master.sh"
@@ -290,20 +266,20 @@ function kube-up {
 
   echo "Starting minion VMs (this can take a minute)..."
 
-  for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
+  for (( i=0; i<${#NODE_NAMES[@]}; i++)); do
     (
       echo "#! /bin/bash"
-      echo "readonly MY_NAME=${MINION_NAMES[$i]}"
+      echo "readonly MY_NAME=${NODE_NAMES[$i]}"
       grep -v "^#" "${KUBE_ROOT}/cluster/vsphere/templates/hostname.sh"
       echo "KUBE_MASTER=${KUBE_MASTER}"
       echo "KUBE_MASTER_IP=${KUBE_MASTER_IP}"
-      echo "MINION_IP_RANGE=${MINION_IP_RANGES[$i]}"
+      echo "NODE_IP_RANGE=${NODE_IP_RANGES[$i]}"
       grep -v "^#" "${KUBE_ROOT}/cluster/vsphere/templates/salt-minion.sh"
     ) > "${KUBE_TEMP}/minion-start-${i}.sh"
 
     (
-      kube-up-vm "${MINION_NAMES[$i]}" -c ${MINION_CPU-1} -m ${MINION_MEMORY_MB-1024}
-      kube-run "${MINION_NAMES[$i]}" "${KUBE_TEMP}/minion-start-${i}.sh"
+      kube-up-vm "${NODE_NAMES[$i]}" -c ${NODE_CPU-1} -m ${NODE_MEMORY_MB-1024}
+      kube-run "${NODE_NAMES[$i]}" "${KUBE_TEMP}/minion-start-${i}.sh"
     ) &
   done
 
@@ -318,7 +294,7 @@ function kube-up {
   fi
 
   # Print minion IPs, so user can log in for debugging.
-  detect-minions
+  detect-nodes
   echo
 
   echo "Waiting for master and minion initialization."
@@ -336,10 +312,10 @@ function kube-up {
   printf " OK\n"
 
   local i
-  for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
-    printf "Waiting for ${MINION_NAMES[$i]} to become available..."
+  for (( i=0; i<${#NODE_NAMES[@]}; i++)); do
+    printf "Waiting for ${NODE_NAMES[$i]} to become available..."
     until curl --max-time 5 \
-            --fail --output /dev/null --silent "http://${KUBE_MINION_IP_ADDRESSES[$i]}:10250/healthz"; do
+            --fail --output /dev/null --silent "http://${KUBE_NODE_IP_ADDRESSES[$i]}:10250/healthz"; do
         printf "."
         sleep 2
     done
@@ -371,10 +347,10 @@ function kube-up {
 
   # Basic sanity checking
   local i
-  for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
+  for (( i=0; i<${#NODE_NAMES[@]}; i++)); do
       # Make sure docker is installed
-      kube-ssh "${KUBE_MINION_IP_ADDRESSES[$i]}" which docker > /dev/null || {
-        echo "Docker failed to install on ${MINION_NAMES[$i]}. Your cluster is unlikely" >&2
+      kube-ssh "${KUBE_NODE_IP_ADDRESSES[$i]}" which docker > /dev/null || {
+        echo "Docker failed to install on ${NODE_NAMES[$i]}. Your cluster is unlikely" >&2
         echo "to work correctly. Please run ./cluster/kube-down.sh and re-create the" >&2
         echo "cluster. (sorry!)" >&2
         exit 1
@@ -396,8 +372,8 @@ function kube-up {
 function kube-down {
   govc vm.destroy ${MASTER_NAME} &
 
-  for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
-    govc vm.destroy ${MINION_NAMES[i]} &
+  for (( i=0; i<${#NODE_NAMES[@]}; i++)); do
+    govc vm.destroy ${NODE_NAMES[i]} &
   done
 
   wait

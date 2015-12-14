@@ -20,16 +20,16 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/client/cache"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/client/unversioned/cache"
-	"k8s.io/kubernetes/pkg/controller/framework"
+	controllerframework "k8s.io/kubernetes/pkg/controller/framework"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/runtime"
@@ -62,71 +62,66 @@ func (a latencySlice) Len() int           { return len(a) }
 func (a latencySlice) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a latencySlice) Less(i, j int) bool { return a[i].Latency < a[j].Latency }
 
-func printLatencies(latencies []podLatencyData, header string) {
-	perc50 := latencies[len(latencies)/2].Latency
-	perc90 := latencies[(len(latencies)*9)/10].Latency
-	perc99 := latencies[(len(latencies)*99)/100].Latency
-	Logf("10%% %s: %v", header, latencies[(len(latencies)*9)/10:len(latencies)])
-	Logf("perc50: %v, perc90: %v, perc99: %v", perc50, perc90, perc99)
+func extractLatencyMetrics(latencies []podLatencyData) LatencyMetric {
+	length := len(latencies)
+	perc50 := latencies[int(math.Ceil(float64(length*50)/100))-1].Latency
+	perc90 := latencies[int(math.Ceil(float64(length*90)/100))-1].Latency
+	perc99 := latencies[int(math.Ceil(float64(length*99)/100))-1].Latency
+	return LatencyMetric{Perc50: perc50, Perc90: perc90, Perc99: perc99}
 }
 
-// List nodes via gcloud. We don't rely on the apiserver because we really want the node ips
-// and sometimes the node controller is slow to populate them.
-func gcloudListNodes() {
-	Logf("Listing nodes via gcloud:")
-	output, err := exec.Command("gcloud", "compute", "instances", "list",
-		"--project="+testContext.CloudConfig.ProjectID, "--zone="+testContext.CloudConfig.Zone).CombinedOutput()
-	if err != nil {
-		Logf("Failed to list nodes: %v", err)
-		return
+func density30AddonResourceVerifier() map[string]resourceConstraint {
+	constraints := make(map[string]resourceConstraint)
+	constraints["fluentd-elasticsearch"] = resourceConstraint{
+		cpuConstraint:    0.1,
+		memoryConstraint: 250 * (1024 * 1024),
 	}
-	Logf(string(output))
-	return
+	constraints["elasticsearch-logging"] = resourceConstraint{
+		cpuConstraint:    2,
+		memoryConstraint: 750 * (1024 * 1024),
+	}
+	constraints["heapster"] = resourceConstraint{
+		cpuConstraint:    2,
+		memoryConstraint: 1800 * (1024 * 1024),
+	}
+	constraints["kibana-logging"] = resourceConstraint{
+		cpuConstraint:    0.05,
+		memoryConstraint: 100 * (1024 * 1024),
+	}
+	constraints["kube-proxy"] = resourceConstraint{
+		cpuConstraint:    0.05,
+		memoryConstraint: 20 * (1024 * 1024),
+	}
+	constraints["l7-lb-controller"] = resourceConstraint{
+		cpuConstraint:    0.05,
+		memoryConstraint: 20 * (1024 * 1024),
+	}
+	constraints["influxdb"] = resourceConstraint{
+		cpuConstraint:    2,
+		memoryConstraint: 300 * (1024 * 1024),
+	}
+	return constraints
 }
 
-// This test suite can take a long time to run, so by default it is added to
-// the ginkgo.skip list (see driver.go).
+// This test suite can take a long time to run, and can affect or be affected by other tests.
+// So by default it is added to the ginkgo.skip list (see driver.go).
 // To run this suite you must explicitly ask for it by setting the
 // -t/--test flag or ginkgo.focus flag.
-var _ = Describe("Density", func() {
+var _ = Describe("Density [Skipped]", func() {
 	var c *client.Client
-	var minionCount int
+	var nodeCount int
 	var RCName string
 	var additionalPodsPrefix string
 	var ns string
 	var uuid string
 
-	BeforeEach(func() {
-		var err error
-		c, err = loadClient()
-		expectNoError(err)
-		minions, err := c.Nodes().List(labels.Everything(), fields.Everything())
-		expectNoError(err)
-		minionCount = len(minions.Items)
-		Expect(minionCount).NotTo(BeZero())
-
-		// Terminating a namespace (deleting the remaining objects from it - which
-		// generally means events) can affect the current run. Thus we wait for all
-		// terminating namespace to be finally deleted before starting this test.
-		err = deleteTestingNS(c)
-		expectNoError(err)
-
-		nsForTesting, err := createTestingNS("density", c)
-		ns = nsForTesting.Name
-		expectNoError(err)
-		uuid = string(util.NewUUID())
-
-		expectNoError(resetMetrics(c))
-		expectNoError(os.Mkdir(fmt.Sprintf(testContext.OutputDir+"/%s", uuid), 0777))
-		expectNoError(writePerfData(c, fmt.Sprintf(testContext.OutputDir+"/%s", uuid), "before"))
-		gcloudListNodes()
-	})
-
+	// Gathers data prior to framework namespace teardown
 	AfterEach(func() {
 		// Remove any remaining pods from this test if the
 		// replication controller still exists and the replica count
 		// isn't 0.  This means the controller wasn't cleaned up
-		// during the test so clean it up here
+		// during the test so clean it up here. We want to do it separately
+		// to not cause a timeout on Namespace removal.
 		rc, err := c.ReplicationControllers(ns).Get(RCName)
 		if err == nil && rc.Spec.Replicas != 0 {
 			By("Cleaning up the replication controller")
@@ -135,66 +130,99 @@ var _ = Describe("Density", func() {
 		}
 
 		By("Removing additional pods if any")
-		for i := 1; i <= minionCount; i++ {
+		for i := 1; i <= nodeCount; i++ {
 			name := additionalPodsPrefix + "-" + strconv.Itoa(i)
 			c.Pods(ns).Delete(name, nil)
 		}
 
-		By(fmt.Sprintf("Destroying namespace for this suite %v", ns))
-		if err := c.Namespaces().Delete(ns); err != nil {
-			Failf("Couldn't delete ns %s", err)
-		}
-
 		expectNoError(writePerfData(c, fmt.Sprintf(testContext.OutputDir+"/%s", uuid), "after"))
 
-		// Verify latency metrics
-		// TODO: We should reset metrics before the test. Currently previous tests influence latency metrics.
-		highLatencyRequests, err := HighLatencyRequests(c, 3*time.Second, util.NewStringSet("events"))
+		// Verify latency metrics.
+		highLatencyRequests, err := HighLatencyRequests(c)
 		expectNoError(err)
 		Expect(highLatencyRequests).NotTo(BeNumerically(">", 0), "There should be no high-latency requests")
+
+		// Verify scheduler metrics.
+		// TODO: Reset metrics at the beginning of the test.
+		// We should do something similar to how we do it for APIserver.
+		expectNoError(VerifySchedulerLatency())
 	})
 
-	// Tests with "Skipped" substring in their name will be skipped when running
-	// e2e test suite without --ginkgo.focus & --ginkgo.skip flags.
+	// Explicitly put here, to delete namespace at the end of the test
+	// (after measuring latency metrics, etc.).
+	framework := NewFramework("density")
+	framework.NamespaceDeletionTimeout = time.Hour
+
+	BeforeEach(func() {
+		c = framework.Client
+		ns = framework.Namespace.Name
+		var err error
+
+		nodes, err := c.Nodes().List(api.ListOptions{})
+		expectNoError(err)
+		nodeCount = len(nodes.Items)
+		Expect(nodeCount).NotTo(BeZero())
+
+		// Terminating a namespace (deleting the remaining objects from it - which
+		// generally means events) can affect the current run. Thus we wait for all
+		// terminating namespace to be finally deleted before starting this test.
+		err = checkTestingNSDeletedExcept(c, ns)
+		expectNoError(err)
+
+		uuid = string(util.NewUUID())
+
+		expectNoError(resetMetrics(c))
+		expectNoError(os.Mkdir(fmt.Sprintf(testContext.OutputDir+"/%s", uuid), 0777))
+		expectNoError(writePerfData(c, fmt.Sprintf(testContext.OutputDir+"/%s", uuid), "before"))
+
+		Logf("Listing nodes for easy debugging:\n")
+		for _, node := range nodes.Items {
+			var internalIP, externalIP string
+			for _, address := range node.Status.Addresses {
+				if address.Type == api.NodeInternalIP {
+					internalIP = address.Address
+				}
+				if address.Type == api.NodeExternalIP {
+					externalIP = address.Address
+				}
+			}
+			Logf("Name: %v, clusterIP: %v, externalIP: %v", node.ObjectMeta.Name, internalIP, externalIP)
+		}
+	})
+
 	type Density struct {
-		skip bool
 		// Controls if e2e latency tests should be run (they are slow)
 		runLatencyTest bool
-		podsPerMinion  int
+		podsPerNode    int
 		// Controls how often the apiserver is polled for pods
 		interval time.Duration
 	}
 
 	densityTests := []Density{
-		// This test should not be run in a regular jenkins run, because it is not isolated enough
-		// (metrics from other tests affects this one).
-		// TODO: Reenable once we can measure latency only from a single test.
 		// TODO: Expose runLatencyTest as ginkgo flag.
-		{podsPerMinion: 3, skip: true, runLatencyTest: false, interval: 10 * time.Second},
-		{podsPerMinion: 30, skip: true, runLatencyTest: true, interval: 10 * time.Second},
+		{podsPerNode: 3, runLatencyTest: false, interval: 10 * time.Second},
+		{podsPerNode: 30, runLatencyTest: true, interval: 10 * time.Second},
 		// More than 30 pods per node is outside our v1.0 goals.
 		// We might want to enable those tests in the future.
-		{podsPerMinion: 50, skip: true, runLatencyTest: false, interval: 10 * time.Second},
-		{podsPerMinion: 100, skip: true, runLatencyTest: false, interval: 1 * time.Second},
+		{podsPerNode: 50, runLatencyTest: false, interval: 10 * time.Second},
+		{podsPerNode: 100, runLatencyTest: false, interval: 1 * time.Second},
 	}
 
 	for _, testArg := range densityTests {
-		name := fmt.Sprintf("should allow starting %d pods per node", testArg.podsPerMinion)
-		if testArg.podsPerMinion == 30 {
-			name = "[Performance suite] " + name
-		}
-		if testArg.skip {
-			name = "[Skipped] " + name
+		name := fmt.Sprintf("should allow starting %d pods per node", testArg.podsPerNode)
+		if testArg.podsPerNode == 30 {
+			name = "[Performance] " + name
+			framework.addonResourceConstraints = density30AddonResourceVerifier()
 		}
 		itArg := testArg
 		It(name, func() {
-			totalPods := itArg.podsPerMinion * minionCount
+			totalPods := itArg.podsPerNode * nodeCount
 			RCName = "density" + strconv.Itoa(totalPods) + "-" + uuid
 			fileHndl, err := os.Create(fmt.Sprintf(testContext.OutputDir+"/%s/pod_states.csv", uuid))
 			expectNoError(err)
 			defer fileHndl.Close()
 			config := RCConfig{Client: c,
-				Image:                "gcr.io/google_containers/pause:go",
+				Image:                "gcr.io/google_containers/pause:2.0",
 				Name:                 RCName,
 				Namespace:            ns,
 				PollInterval:         itArg.interval,
@@ -205,18 +233,18 @@ var _ = Describe("Density", func() {
 
 			// Create a listener for events.
 			events := make([](*api.Event), 0)
-			_, controller := framework.NewInformer(
+			_, controller := controllerframework.NewInformer(
 				&cache.ListWatch{
-					ListFunc: func() (runtime.Object, error) {
-						return c.Events(ns).List(labels.Everything(), fields.Everything())
+					ListFunc: func(options api.ListOptions) (runtime.Object, error) {
+						return c.Events(ns).List(options)
 					},
-					WatchFunc: func(rv string) (watch.Interface, error) {
-						return c.Events(ns).Watch(labels.Everything(), fields.Everything(), rv)
+					WatchFunc: func(options api.ListOptions) (watch.Interface, error) {
+						return c.Events(ns).Watch(options)
 					},
 				},
 				&api.Event{},
 				0,
-				framework.ResourceEventHandlerFuncs{
+				controllerframework.ResourceEventHandlerFuncs{
 					AddFunc: func(obj interface{}) {
 						events = append(events, obj.(*api.Event))
 					},
@@ -253,11 +281,11 @@ var _ = Describe("Density", func() {
 			if itArg.runLatencyTest {
 				Logf("Schedling additional Pods to measure startup latencies")
 
-				createTimes := make(map[string]util.Time, 0)
+				createTimes := make(map[string]unversioned.Time, 0)
 				nodes := make(map[string]string, 0)
-				scheduleTimes := make(map[string]util.Time, 0)
-				runTimes := make(map[string]util.Time, 0)
-				watchTimes := make(map[string]util.Time, 0)
+				scheduleTimes := make(map[string]unversioned.Time, 0)
+				runTimes := make(map[string]unversioned.Time, 0)
+				watchTimes := make(map[string]unversioned.Time, 0)
 
 				var mutex sync.Mutex
 				checkPod := func(p *api.Pod) {
@@ -267,10 +295,10 @@ var _ = Describe("Density", func() {
 
 					if p.Status.Phase == api.PodRunning {
 						if _, found := watchTimes[p.Name]; !found {
-							watchTimes[p.Name] = util.Now()
+							watchTimes[p.Name] = unversioned.Now()
 							createTimes[p.Name] = p.CreationTimestamp
 							nodes[p.Name] = p.Spec.NodeName
-							var startTime util.Time
+							var startTime unversioned.Time
 							for _, cs := range p.Status.ContainerStatuses {
 								if cs.State.Running != nil {
 									if startTime.Before(cs.State.Running.StartedAt) {
@@ -278,7 +306,7 @@ var _ = Describe("Density", func() {
 									}
 								}
 							}
-							if startTime != util.NewTime(time.Time{}) {
+							if startTime != unversioned.NewTime(time.Time{}) {
 								runTimes[p.Name] = startTime
 							} else {
 								Failf("Pod %v is reported to be running, but none of its containers is", p.Name)
@@ -288,18 +316,20 @@ var _ = Describe("Density", func() {
 				}
 
 				additionalPodsPrefix = "density-latency-pod-" + string(util.NewUUID())
-				_, controller := framework.NewInformer(
+				_, controller := controllerframework.NewInformer(
 					&cache.ListWatch{
-						ListFunc: func() (runtime.Object, error) {
-							return c.Pods(ns).List(labels.SelectorFromSet(labels.Set{"name": additionalPodsPrefix}), fields.Everything())
+						ListFunc: func(options api.ListOptions) (runtime.Object, error) {
+							options.LabelSelector = labels.SelectorFromSet(labels.Set{"name": additionalPodsPrefix})
+							return c.Pods(ns).List(options)
 						},
-						WatchFunc: func(rv string) (watch.Interface, error) {
-							return c.Pods(ns).Watch(labels.SelectorFromSet(labels.Set{"name": additionalPodsPrefix}), fields.Everything(), rv)
+						WatchFunc: func(options api.ListOptions) (watch.Interface, error) {
+							options.LabelSelector = labels.SelectorFromSet(labels.Set{"name": additionalPodsPrefix})
+							return c.Pods(ns).Watch(options)
 						},
 					},
 					&api.Pod{},
 					0,
-					framework.ResourceEventHandlerFuncs{
+					controllerframework.ResourceEventHandlerFuncs{
 						AddFunc: func(obj interface{}) {
 							p, ok := obj.(*api.Pod)
 							Expect(ok).To(Equal(true))
@@ -318,29 +348,32 @@ var _ = Describe("Density", func() {
 
 				// Create some additional pods with throughput ~5 pods/sec.
 				var wg sync.WaitGroup
-				wg.Add(minionCount)
+				wg.Add(nodeCount)
 				podLabels := map[string]string{
 					"name": additionalPodsPrefix,
 				}
-				for i := 1; i <= minionCount; i++ {
+				for i := 1; i <= nodeCount; i++ {
 					name := additionalPodsPrefix + "-" + strconv.Itoa(i)
-					go createRunningPod(&wg, c, name, ns, "gcr.io/google_containers/pause:go", podLabels)
+					go createRunningPod(&wg, c, name, ns, "gcr.io/google_containers/pause:2.0", podLabels)
 					time.Sleep(200 * time.Millisecond)
 				}
 				wg.Wait()
 
 				Logf("Waiting for all Pods begin observed by the watch...")
-				for start := time.Now(); len(watchTimes) < minionCount && time.Since(start) < timeout; time.Sleep(10 * time.Second) {
+				for start := time.Now(); len(watchTimes) < nodeCount; time.Sleep(10 * time.Second) {
+					if time.Since(start) < timeout {
+						Failf("Timeout reached waiting for all Pods being observed by the watch.")
+					}
 				}
 				close(stopCh)
 
-				schedEvents, err := c.Events(ns).List(
-					labels.Everything(),
-					fields.Set{
-						"involvedObject.kind":      "Pod",
-						"involvedObject.namespace": ns,
-						"source":                   "scheduler",
-					}.AsSelector())
+				selector := fields.Set{
+					"involvedObject.kind":      "Pod",
+					"involvedObject.namespace": ns,
+					"source":                   "scheduler",
+				}.AsSelector()
+				options := api.ListOptions{FieldSelector: selector}
+				schedEvents, err := c.Events(ns).List(options)
 				expectNoError(err)
 				for k := range createTimes {
 					for _, event := range schedEvents.Items {
@@ -386,6 +419,10 @@ var _ = Describe("Density", func() {
 				printLatencies(schedToWatchLag, "worst scheduled-to-end total latencies")
 				printLatencies(e2eLag, "worst e2e total latencies")
 
+				// Test whether e2e pod startup time is acceptable.
+				podStartupLatency := PodStartupLatency{Latency: extractLatencyMetrics(e2eLag)}
+				expectNoError(VerifyPodStartupLatency(podStartupLatency))
+
 				// Log suspicious latency metrics/docker errors from all nodes that had slow startup times
 				for _, l := range startupLag {
 					if l.Latency > NodeStartupThreshold {
@@ -394,7 +431,7 @@ var _ = Describe("Density", func() {
 				}
 
 				Logf("Approx throughput: %v pods/min",
-					float64(minionCount)/(e2eLag[len(e2eLag)-1].Latency.Minutes()))
+					float64(nodeCount)/(e2eLag[len(e2eLag)-1].Latency.Minutes()))
 			}
 		})
 	}
@@ -404,7 +441,7 @@ func createRunningPod(wg *sync.WaitGroup, c *client.Client, name, ns, image stri
 	defer GinkgoRecover()
 	defer wg.Done()
 	pod := &api.Pod{
-		TypeMeta: api.TypeMeta{
+		TypeMeta: unversioned.TypeMeta{
 			Kind: "Pod",
 		},
 		ObjectMeta: api.ObjectMeta{
@@ -418,6 +455,7 @@ func createRunningPod(wg *sync.WaitGroup, c *client.Client, name, ns, image stri
 					Image: image,
 				},
 			},
+			DNSPolicy: api.DNSDefault,
 		},
 	}
 	_, err := c.Pods(ns).Create(pod)

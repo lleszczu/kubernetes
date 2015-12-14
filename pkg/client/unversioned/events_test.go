@@ -14,7 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package unversioned
+package unversioned_test
+
+import (
+	. "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/client/unversioned/testclient/simple"
+)
 
 import (
 	"net/url"
@@ -23,33 +28,31 @@ import (
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/testapi"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 )
 
 func TestEventSearch(t *testing.T) {
-	c := &testClient{
-		Request: testRequest{
+	c := &simple.Client{
+		Request: simple.Request{
 			Method: "GET",
-			Path:   testapi.ResourcePath("events", "baz", ""),
+			Path:   testapi.Default.ResourcePath("events", "baz", ""),
 			Query: url.Values{
-				api.FieldSelectorQueryParam(testapi.Version()): []string{
-					getInvolvedObjectNameFieldLabel(testapi.Version()) + "=foo,",
+				unversioned.FieldSelectorQueryParam(testapi.Default.GroupVersion().String()): []string{
+					GetInvolvedObjectNameFieldLabel(testapi.Default.GroupVersion().String()) + "=foo,",
 					"involvedObject.namespace=baz,",
 					"involvedObject.kind=Pod",
 				},
-				api.LabelSelectorQueryParam(testapi.Version()): []string{},
+				unversioned.LabelSelectorQueryParam(testapi.Default.GroupVersion().String()): []string{},
 			},
 		},
-		Response: Response{StatusCode: 200, Body: &api.EventList{}},
+		Response: simple.Response{StatusCode: 200, Body: &api.EventList{}},
 	}
-	eventList, err := c.Setup().Events("baz").Search(
+	eventList, err := c.Setup(t).Events("baz").Search(
 		&api.Pod{
 			ObjectMeta: api.ObjectMeta{
 				Name:      "foo",
 				Namespace: "baz",
-				SelfLink:  testapi.SelfLink("pods", ""),
+				SelfLink:  testapi.Default.SelfLink("pods", ""),
 			},
 		},
 	)
@@ -65,7 +68,7 @@ func TestEventCreate(t *testing.T) {
 		APIVersion:      "apiv1",
 		ResourceVersion: "1",
 	}
-	timeStamp := util.Now()
+	timeStamp := unversioned.Now()
 	event := &api.Event{
 		ObjectMeta: api.ObjectMeta{
 			Namespace: api.NamespaceDefault,
@@ -74,17 +77,18 @@ func TestEventCreate(t *testing.T) {
 		FirstTimestamp: timeStamp,
 		LastTimestamp:  timeStamp,
 		Count:          1,
+		Type:           api.EventTypeNormal,
 	}
-	c := &testClient{
-		Request: testRequest{
+	c := &simple.Client{
+		Request: simple.Request{
 			Method: "POST",
-			Path:   testapi.ResourcePath("events", api.NamespaceDefault, ""),
+			Path:   testapi.Default.ResourcePath("events", api.NamespaceDefault, ""),
 			Body:   event,
 		},
-		Response: Response{StatusCode: 200, Body: event},
+		Response: simple.Response{StatusCode: 200, Body: event},
 	}
 
-	response, err := c.Setup().Events(api.NamespaceDefault).Create(event)
+	response, err := c.Setup(t).Events(api.NamespaceDefault).Create(event)
 
 	if err != nil {
 		t.Fatalf("%v should be nil.", err)
@@ -104,7 +108,7 @@ func TestEventGet(t *testing.T) {
 		APIVersion:      "apiv1",
 		ResourceVersion: "1",
 	}
-	timeStamp := util.Now()
+	timeStamp := unversioned.Now()
 	event := &api.Event{
 		ObjectMeta: api.ObjectMeta{
 			Namespace: "other",
@@ -113,17 +117,18 @@ func TestEventGet(t *testing.T) {
 		FirstTimestamp: timeStamp,
 		LastTimestamp:  timeStamp,
 		Count:          1,
+		Type:           api.EventTypeNormal,
 	}
-	c := &testClient{
-		Request: testRequest{
+	c := &simple.Client{
+		Request: simple.Request{
 			Method: "GET",
-			Path:   testapi.ResourcePath("events", "other", "1"),
+			Path:   testapi.Default.ResourcePath("events", "other", "1"),
 			Body:   nil,
 		},
-		Response: Response{StatusCode: 200, Body: event},
+		Response: simple.Response{StatusCode: 200, Body: event},
 	}
 
-	response, err := c.Setup().Events("other").Get("1")
+	response, err := c.Setup(t).Events("other").Get("1")
 
 	if err != nil {
 		t.Fatalf("%v should be nil.", err)
@@ -144,7 +149,7 @@ func TestEventList(t *testing.T) {
 		APIVersion:      "apiv1",
 		ResourceVersion: "1",
 	}
-	timeStamp := util.Now()
+	timeStamp := unversioned.Now()
 	eventList := &api.EventList{
 		Items: []api.Event{
 			{
@@ -152,19 +157,19 @@ func TestEventList(t *testing.T) {
 				FirstTimestamp: timeStamp,
 				LastTimestamp:  timeStamp,
 				Count:          1,
+				Type:           api.EventTypeNormal,
 			},
 		},
 	}
-	c := &testClient{
-		Request: testRequest{
+	c := &simple.Client{
+		Request: simple.Request{
 			Method: "GET",
-			Path:   testapi.ResourcePath("events", ns, ""),
+			Path:   testapi.Default.ResourcePath("events", ns, ""),
 			Body:   nil,
 		},
-		Response: Response{StatusCode: 200, Body: eventList},
+		Response: simple.Response{StatusCode: 200, Body: eventList},
 	}
-	response, err := c.Setup().Events(ns).List(labels.Everything(),
-		fields.Everything())
+	response, err := c.Setup(t).Events(ns).List(api.ListOptions{})
 
 	if err != nil {
 		t.Errorf("%#v should be nil.", err)
@@ -183,13 +188,13 @@ func TestEventList(t *testing.T) {
 
 func TestEventDelete(t *testing.T) {
 	ns := api.NamespaceDefault
-	c := &testClient{
-		Request: testRequest{
+	c := &simple.Client{
+		Request: simple.Request{
 			Method: "DELETE",
-			Path:   testapi.ResourcePath("events", ns, "foo"),
+			Path:   testapi.Default.ResourcePath("events", ns, "foo"),
 		},
-		Response: Response{StatusCode: 200},
+		Response: simple.Response{StatusCode: 200},
 	}
-	err := c.Setup().Events(ns).Delete("foo")
+	err := c.Setup(t).Events(ns).Delete("foo")
 	c.Validate(t, nil, err)
 }

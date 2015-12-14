@@ -20,6 +20,8 @@ import (
 	"testing"
 )
 
+// TODO these tests don't add much value for testing things that have groups
+
 func TestResourcePathWithPrefix(t *testing.T) {
 	testCases := []struct {
 		prefix    string
@@ -28,14 +30,14 @@ func TestResourcePathWithPrefix(t *testing.T) {
 		name      string
 		expected  string
 	}{
-		{"prefix", "resource", "mynamespace", "myresource", "/api/" + Version() + "/prefix/namespaces/mynamespace/resource/myresource"},
-		{"prefix", "resource", "", "myresource", "/api/" + Version() + "/prefix/resource/myresource"},
-		{"prefix", "resource", "mynamespace", "", "/api/" + Version() + "/prefix/namespaces/mynamespace/resource"},
-		{"prefix", "resource", "", "", "/api/" + Version() + "/prefix/resource"},
-		{"", "resource", "mynamespace", "myresource", "/api/" + Version() + "/namespaces/mynamespace/resource/myresource"},
+		{"prefix", "resource", "mynamespace", "myresource", "/api/" + Default.GroupVersion().Version + "/prefix/namespaces/mynamespace/resource/myresource"},
+		{"prefix", "resource", "", "myresource", "/api/" + Default.GroupVersion().Version + "/prefix/resource/myresource"},
+		{"prefix", "resource", "mynamespace", "", "/api/" + Default.GroupVersion().Version + "/prefix/namespaces/mynamespace/resource"},
+		{"prefix", "resource", "", "", "/api/" + Default.GroupVersion().Version + "/prefix/resource"},
+		{"", "resource", "mynamespace", "myresource", "/api/" + Default.GroupVersion().Version + "/namespaces/mynamespace/resource/myresource"},
 	}
 	for _, item := range testCases {
-		if actual := ResourcePathWithPrefix(item.prefix, item.resource, item.namespace, item.name); actual != item.expected {
+		if actual := Default.ResourcePathWithPrefix(item.prefix, item.resource, item.namespace, item.name); actual != item.expected {
 			t.Errorf("Expected: %s, got: %s for prefix: %s, resource: %s, namespace: %s and name: %s", item.expected, actual, item.prefix, item.resource, item.namespace, item.name)
 		}
 	}
@@ -48,13 +50,13 @@ func TestResourcePath(t *testing.T) {
 		name      string
 		expected  string
 	}{
-		{"resource", "mynamespace", "myresource", "/api/" + Version() + "/namespaces/mynamespace/resource/myresource"},
-		{"resource", "", "myresource", "/api/" + Version() + "/resource/myresource"},
-		{"resource", "mynamespace", "", "/api/" + Version() + "/namespaces/mynamespace/resource"},
-		{"resource", "", "", "/api/" + Version() + "/resource"},
+		{"resource", "mynamespace", "myresource", "/api/" + Default.GroupVersion().Version + "/namespaces/mynamespace/resource/myresource"},
+		{"resource", "", "myresource", "/api/" + Default.GroupVersion().Version + "/resource/myresource"},
+		{"resource", "mynamespace", "", "/api/" + Default.GroupVersion().Version + "/namespaces/mynamespace/resource"},
+		{"resource", "", "", "/api/" + Default.GroupVersion().Version + "/resource"},
 	}
 	for _, item := range testCases {
-		if actual := ResourcePath(item.resource, item.namespace, item.name); actual != item.expected {
+		if actual := Default.ResourcePath(item.resource, item.namespace, item.name); actual != item.expected {
 			t.Errorf("Expected: %s, got: %s for resource: %s, namespace: %s and name: %s", item.expected, actual, item.resource, item.namespace, item.name)
 		}
 	}

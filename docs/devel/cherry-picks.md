@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/devel/cherry-picks.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/devel/cherry-picks.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -62,7 +62,7 @@ conflict***.
 
 Now that we've structured cherry picks as PRs, searching for all cherry-picks
 against a release is a GitHub query: For example,
-[this query is all of the v0.21.x cherry-picks](https://github.com/GoogleCloudPlatform/kubernetes/pulls?utf8=%E2%9C%93&q=is%3Apr+%22automated+cherry+pick%22+base%3Arelease-0.21)
+[this query is all of the v0.21.x cherry-picks](https://github.com/kubernetes/kubernetes/pulls?utf8=%E2%9C%93&q=is%3Apr+%22automated+cherry+pick%22+base%3Arelease-0.21)
 
 
 <!-- BEGIN MUNGE: GENERATED_ANALYTICS -->

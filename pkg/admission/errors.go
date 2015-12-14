@@ -19,22 +19,18 @@ package admission
 import (
 	"k8s.io/kubernetes/pkg/api"
 	apierrors "k8s.io/kubernetes/pkg/api/errors"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	utilerrors "k8s.io/kubernetes/pkg/util/errors"
 )
 
-// NewForbidden is a utility function to return a well-formatted admission control error response
-func NewForbidden(a Attributes, internalError error) error {
-	// do not double wrap an error of same type
-	if apierrors.IsForbidden(internalError) {
-		return internalError
-	}
-
-	name := "Unknown"
-	kind := a.GetKind()
+func extractKindName(a Attributes) (name string, kind unversioned.GroupKind, err error) {
+	name = "Unknown"
+	kind = a.GetKind()
 	obj := a.GetObject()
 	if obj != nil {
 		objectMeta, err := api.ObjectMetaFor(obj)
 		if err != nil {
-			return apierrors.NewForbidden(kind, name, internalError)
+			return "", unversioned.GroupKind{}, err
 		}
 
 		// this is necessary because name object name generation has not occurred yet
@@ -44,5 +40,27 @@ func NewForbidden(a Attributes, internalError error) error {
 			name = objectMeta.GenerateName
 		}
 	}
-	return apierrors.NewForbidden(kind, name, internalError)
+	return name, kind, nil
+}
+
+// NewForbidden is a utility function to return a well-formatted admission control error response
+func NewForbidden(a Attributes, internalError error) error {
+	// do not double wrap an error of same type
+	if apierrors.IsForbidden(internalError) {
+		return internalError
+	}
+	name, kind, err := extractKindName(a)
+	if err != nil {
+		return apierrors.NewInternalError(utilerrors.NewAggregate([]error{internalError, err}))
+	}
+	return apierrors.NewForbidden(kind.Kind, name, internalError)
+}
+
+// NewNotFound is a utility function to return a well-formatted admission control error response
+func NewNotFound(a Attributes) error {
+	name, kind, err := extractKindName(a)
+	if err != nil {
+		return apierrors.NewInternalError(err)
+	}
+	return apierrors.NewNotFound(kind.Kind, name)
 }

@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/admin/README.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/admin/README.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -54,6 +54,7 @@ It assumes some familiarity with concepts in the [User Guide](../user-guide/READ
     1. [The kube-controller-manager binary](kube-controller-manager.md)
   1. [Administrating Kubernetes Nodes](node.md)
     1. [The kubelet binary](kubelet.md)
+      1. [Garbage Collection](garbage-collection.md)
     1. [The kube-proxy binary](kube-proxy.md)
   1. Administrating Addons
     1. [DNS](dns.md)
